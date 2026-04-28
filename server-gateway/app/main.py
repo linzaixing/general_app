@@ -3,7 +3,7 @@ import os
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 
@@ -31,6 +31,15 @@ def _auth_or_401(authorization: str | None) -> None:
     token = authorization.replace("Bearer ", "", 1).strip()
     if token != GATEWAY_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+def _ws_auth_ok(authorization: str | None) -> bool:
+    if not GATEWAY_API_KEY:
+        return True
+    if not authorization or not authorization.startswith("Bearer "):
+        return False
+    token = authorization.replace("Bearer ", "", 1).strip()
+    return token == GATEWAY_API_KEY
 
 
 def _upstream_headers() -> dict[str, str]:
@@ -62,6 +71,24 @@ def _extract_chat_text(payload: dict[str, Any]) -> str:
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.websocket("/v1/ws/commands")
+@app.websocket("/ws/commands")
+async def ws_commands(websocket: WebSocket) -> None:
+    auth = websocket.headers.get("authorization")
+    if not _ws_auth_ok(auth):
+        # 1008 = policy violation
+        await websocket.close(code=1008, reason="Unauthorized")
+        return
+
+    await websocket.accept()
+    try:
+        while True:
+            text = await websocket.receive_text()
+            await websocket.send_text(f"已经收到信息：{text}")
+    except WebSocketDisconnect:
+        return
 
 
 @app.post("/v1/audio/transcriptions")

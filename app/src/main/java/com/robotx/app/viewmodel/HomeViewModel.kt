@@ -10,6 +10,7 @@ import com.robotx.app.data.ChatRepository
 import com.robotx.app.data.ChatRole
 import com.robotx.app.data.MediaKind
 import com.robotx.app.network.VlaClient
+import com.robotx.app.network.WebSocketCommandClient
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -84,6 +85,16 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         runVlaInference(prompt, null, MediaKind.NONE)
     }
 
+    /**
+     * 仅用于 WebSocket 通路自测：把一条文本发到 ws/commands 端点，等待回执。
+     * 不会改变主对话链路，主链路仍走 HTTP chat/completions。
+     */
+    fun sendWebSocketEcho(prompt: String) {
+        if (prompt.isBlank()) return
+        ChatRepository.add(ChatMessage(role = ChatRole.USER, text = "[WS] $prompt"))
+        runWebSocketCommand(prompt)
+    }
+
     fun clearChat() {
         ChatRepository.clear()
     }
@@ -150,6 +161,35 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
             }
             _isThinking.value = false
             if (hideUserMessage) Unit // placeholder for symmetry
+        }
+    }
+
+    private fun runWebSocketCommand(
+        command: String,
+        hideUserMessage: Boolean = false,
+    ) {
+        inferenceJob?.cancel()
+        inferenceJob = viewModelScope.launch {
+            _isThinking.value = true
+            val placeholder = ChatMessage(role = ChatRole.AI, text = "", pending = true)
+            ChatRepository.add(placeholder)
+            val r = WebSocketCommandClient.sendCommand(command)
+            r.onSuccess { reply ->
+                ChatRepository.update(placeholder.id) {
+                    it.copy(text = reply, pending = false)
+                }
+            }.onFailure { err ->
+                ChatRepository.update(placeholder.id) {
+                    it.copy(
+                        text = "[WebSocket 请求失败]",
+                        pending = false,
+                        error = err.message,
+                    )
+                }
+                _toast.value = "WebSocket 请求失败: ${err.message}"
+            }
+            _isThinking.value = false
+            if (hideUserMessage) Unit
         }
     }
 }

@@ -85,10 +85,6 @@ fun SettingsDialog(
                         onClick = { applyPreset(ApiConfig.Preset.DASHSCOPE) },
                         label = { Text(stringResource(R.string.preset_dashscope)) },
                     )
-                    AssistChip(
-                        onClick = { applyPreset(ApiConfig.Preset.OPENAI) },
-                        label = { Text(stringResource(R.string.preset_openai)) },
-                    )
                 }
 
                 OutlinedTextField(

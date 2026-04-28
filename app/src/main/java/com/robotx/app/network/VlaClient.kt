@@ -57,10 +57,18 @@ object VlaClient {
     private const val TAG = "VlaClient"
     private const val MAX_IMAGE_DIM = 1024
     private const val VIDEO_FRAME_COUNT = 4
-    private const val SYSTEM_PROMPT =
-        "You are Robot X, a robot assistant. Describe what you see in the image" +
-        " or video and, when appropriate, output the next action as a JSON code" +
-        " block like ```json {\"action\":\"...\",\"params\":{...}} ``` ."
+
+    /** 纯文本问答：让模型直接用自然中文回答，不要输出 JSON 或代码块。 */
+    private const val SYSTEM_PROMPT_TEXT =
+        "你是 Fly Agent，一个友好的中文助手。请直接用自然、简洁的中文回答用户的问题，" +
+        "不要输出 JSON、代码块、Markdown 或任何格式化标记，也不要使用占位符。"
+
+    /** 视觉问答：先描述画面，再回答问题，必要时再追加动作 JSON 块。 */
+    private const val SYSTEM_PROMPT_VISION =
+        "你是 Fly Agent，一个机器人助手。请先用一两句话描述图像/视频中的内容，" +
+        "再用中文回答用户的问题。若用户明确要求动作建议，可以在最末尾追加一个 " +
+        "```json {\"action\":\"动作名\",\"params\":{...}}``` 代码块；" +
+        "如果不需要动作建议则不要输出任何 JSON。"
 
     private val JSON = "application/json; charset=utf-8".toMediaType()
 
@@ -74,32 +82,46 @@ object VlaClient {
             return@withContext Result.failure(IllegalStateException("Cloud API not configured"))
         }
 
+        val hasImage = imageFile != null && imageFile.exists()
+        val hasVideo = videoFile != null && videoFile.exists()
+        val hasMedia = hasImage || hasVideo
+
         val parts = mutableListOf<JsonObject>()
-        if (imageFile != null && imageFile.exists()) {
-            val dataUrl = imageFile.toCompressedDataUrl()
+        if (hasImage) {
+            val dataUrl = imageFile!!.toCompressedDataUrl()
             parts += buildJsonObject {
                 put("type", "image_url")
                 put("image_url", buildJsonObject { put("url", dataUrl) })
             }
         }
-        if (videoFile != null && videoFile.exists()) {
-            extractKeyframes(videoFile, VIDEO_FRAME_COUNT).forEach { dataUrl ->
+        if (hasVideo) {
+            extractKeyframes(videoFile!!, VIDEO_FRAME_COUNT).forEach { dataUrl ->
                 parts += buildJsonObject {
                     put("type", "image_url")
                     put("image_url", buildJsonObject { put("url", dataUrl) })
                 }
             }
         }
+        val defaultPrompt = if (hasMedia) "请描述当前画面。" else "你好。"
         parts += buildJsonObject {
             put("type", "text")
-            put("text", prompt.ifBlank { "请描述当前画面，并给出下一步动作建议。" })
+            put("text", prompt.ifBlank { defaultPrompt })
+        }
+
+        val systemPrompt = if (hasMedia) SYSTEM_PROMPT_VISION else SYSTEM_PROMPT_TEXT
+
+        // 纯文本场景下用 string content 兼容性更好（部分模型不支持 array content 里没有图片）。
+        val userContent: JsonElement = if (hasMedia) {
+            JsonArray(parts)
+        } else {
+            JsonPrimitive(prompt.ifBlank { defaultPrompt })
         }
 
         val req = VlaRequest(
             model = cfg.vlaModel,
             messages = listOf(
-                VlaMessage(role = "system", content = JsonPrimitive(SYSTEM_PROMPT)),
-                VlaMessage(role = "user", content = JsonArray(parts)),
+                VlaMessage(role = "system", content = JsonPrimitive(systemPrompt)),
+                VlaMessage(role = "user", content = userContent),
             ),
             stream = false,
         )
@@ -121,8 +143,28 @@ object VlaClient {
                 if (text.isBlank()) {
                     throw IllegalStateException(resp.message ?: "Empty VLA result: ${raw.take(200)}")
                 }
-                text
+                sanitizeReply(text)
             }
+    }
+
+    /**
+     * 把模型回复里"成对的代码块"剥掉，只保留正文自然语言。
+     *
+     * 关键规则：
+     * 1. 仅剥掉成对的 ``` 代码块（包括 ```json）。
+     * 2. 不再扫描裸 `{ "action": ... }`，因为容易把"含括号的正常文字"误删。
+     * 3. 如果剥掉之后剩下的是空白，直接退回原文，绝不再编造"我已完成画面分析"之类的兜底文案，
+     *    避免出现"$action"这种占位字符直接呈现给用户。
+     */
+    private fun sanitizeReply(raw: String): String {
+        val fencedJsonRegex = Regex("```json[\\s\\S]*?```", setOf(RegexOption.IGNORE_CASE))
+        val genericFenceRegex = Regex("```[\\s\\S]*?```")
+        val text = raw
+            .replace(fencedJsonRegex, "")
+            .replace(genericFenceRegex, "")
+            .replace(Regex("\\n{3,}"), "\n\n")
+            .trim()
+        return text.ifBlank { raw.trim() }
     }
 
     private suspend fun execute(req: Request): String =
