@@ -49,12 +49,13 @@ object ApiConfig {
     private val KEY_VLA_PATH = stringPreferencesKey("vla_path")
     private val KEY_VLA_MODEL = stringPreferencesKey("vla_model")
 
-    // 默认指向占位的自建服务器 IP，请到设置里改成自己的服务器地址或选预设。
-    private const val DEFAULT_BASE_URL = "http://192.168.1.100:8000/v1"
-    private const val DEFAULT_ASR_PATH = "/audio/transcriptions"
-    private const val DEFAULT_ASR_MODEL = "whisper-1"
+    // 默认直接对接阿里云 DashScope OpenAI 兼容协议，开箱即用。
+    private const val DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    private const val DEFAULT_API_KEY = "sk-f2f9a568b36946d8ad4eb777bfcaa6a6"
+    private const val DEFAULT_ASR_PATH = "/chat/completions"
+    private const val DEFAULT_ASR_MODEL = "qwen3-asr-flash"
     private const val DEFAULT_VLA_PATH = "/chat/completions"
-    private const val DEFAULT_VLA_MODEL = "gpt-4o-mini"
+    private const val DEFAULT_VLA_MODEL = "qwen2.5-vl-7b-instruct"
 
     /** 预设：可在 SettingsDialog 里点按钮一键填入。 */
     enum class Preset(
@@ -69,7 +70,7 @@ object ApiConfig {
             "自建服务器",
             "http://192.168.1.100:8000/v1",
             "/audio/transcriptions", "whisper-1",
-            "/chat/completions", "gpt-4o-mini",
+            "/chat/completions", "qwen2.5-vl-7b-instruct",
         ),
         DASHSCOPE(
             "阿里云 DashScope",
@@ -77,12 +78,6 @@ object ApiConfig {
             // DashScope OpenAI 兼容 ASR 走 chat/completions + input_audio
             "/chat/completions", "qwen3-asr-flash",
             "/chat/completions", "qwen2.5-vl-7b-instruct",
-        ),
-        OPENAI(
-            "OpenAI",
-            "https://api.openai.com/v1",
-            "/audio/transcriptions", "whisper-1",
-            "/chat/completions", "gpt-4o-mini",
         ),
     }
 
@@ -102,8 +97,8 @@ object ApiConfig {
 
     private val _state = MutableStateFlow(
         Snapshot(
-            baseUrl = "",
-            apiKey = "",
+            baseUrl = DEFAULT_BASE_URL,
+            apiKey = DEFAULT_API_KEY,
             asrPath = DEFAULT_ASR_PATH,
             asrModel = DEFAULT_ASR_MODEL,
             vlaPath = DEFAULT_VLA_PATH,
@@ -118,25 +113,11 @@ object ApiConfig {
         // from non-suspending callers (e.g. network code) right after init.
         runBlocking {
             val p = appContext.apiDataStore.data.first()
-            _state.value = Snapshot(
-                baseUrl = p[KEY_BASE_URL] ?: DEFAULT_BASE_URL,
-                apiKey = p[KEY_API_KEY] ?: "",
-                asrPath = p[KEY_ASR_PATH] ?: DEFAULT_ASR_PATH,
-                asrModel = p[KEY_ASR_MODEL] ?: DEFAULT_ASR_MODEL,
-                vlaPath = p[KEY_VLA_PATH] ?: DEFAULT_VLA_PATH,
-                vlaModel = p[KEY_VLA_MODEL] ?: DEFAULT_VLA_MODEL,
-            )
+            _state.value = snapshotFromPrefs(p)
         }
         ioScope.launch {
             appContext.apiDataStore.data.collect { p ->
-                _state.value = Snapshot(
-                    baseUrl = p[KEY_BASE_URL] ?: DEFAULT_BASE_URL,
-                    apiKey = p[KEY_API_KEY] ?: "",
-                    asrPath = p[KEY_ASR_PATH] ?: DEFAULT_ASR_PATH,
-                    asrModel = p[KEY_ASR_MODEL] ?: DEFAULT_ASR_MODEL,
-                    vlaPath = p[KEY_VLA_PATH] ?: DEFAULT_VLA_PATH,
-                    vlaModel = p[KEY_VLA_MODEL] ?: DEFAULT_VLA_MODEL,
-                )
+                _state.value = snapshotFromPrefs(p)
             }
         }
     }
@@ -169,4 +150,18 @@ object ApiConfig {
         val p = if (cleanPath.startsWith("/")) cleanPath else "/$cleanPath"
         return b + p
     }
+
+    /**
+     * 把 DataStore 里的 Preferences 还原成 Snapshot：
+     * - 字段缺失或被存为空字符串时，全部回填默认值（默认指向阿里云 DashScope）。
+     * - 这样老安装（曾把 apiKey 存为空）重启后也能拿到内置的默认 Key。
+     */
+    private fun snapshotFromPrefs(p: Preferences): Snapshot = Snapshot(
+        baseUrl = p[KEY_BASE_URL]?.takeIf { it.isNotBlank() } ?: DEFAULT_BASE_URL,
+        apiKey = p[KEY_API_KEY]?.takeIf { it.isNotBlank() } ?: DEFAULT_API_KEY,
+        asrPath = p[KEY_ASR_PATH]?.takeIf { it.isNotBlank() } ?: DEFAULT_ASR_PATH,
+        asrModel = p[KEY_ASR_MODEL]?.takeIf { it.isNotBlank() } ?: DEFAULT_ASR_MODEL,
+        vlaPath = p[KEY_VLA_PATH]?.takeIf { it.isNotBlank() } ?: DEFAULT_VLA_PATH,
+        vlaModel = p[KEY_VLA_MODEL]?.takeIf { it.isNotBlank() } ?: DEFAULT_VLA_MODEL,
+    )
 }
