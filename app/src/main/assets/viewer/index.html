@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>URDF 视窗</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #12161c; overflow: hidden; }
+    #app { position: fixed; inset: 0; }
+    #hint {
+      position: fixed; left: 8px; bottom: 6px; color: #8b98a8;
+      font: 11px/1.4 -apple-system, "Noto Sans CJK SC", sans-serif; pointer-events: none;
+    }
+    /* 数据异常（未收到 / 已停止）时转琥珀色，避免和正常提示混成一条灰字 */
+    #hint.warn { color: #ffc24b; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="hint">单指拖动旋转 · 双指缩放 · 双击空白处复位视角</div>
+
+  <script type="module">
+    import * as THREE from '../three/three.module.js';
+    import { STLLoader } from '../three/STLLoader.js';
+    import { OrbitControls } from '../three/OrbitControls.js';
+
+    // Kotlin 侧读这个字符串判断是否加载成功（WebView 里 console 拿不到）。
+    window.viewerStatus = 'loading';
+
+    // URDF 的 rpy 是「固定轴 XYZ」（= R = Rz*Ry*Rx），用四元数显式相乘，避免依赖
+    // three.js Euler order 的语义歧义。
+    const AXIS_X = new THREE.Vector3(1, 0, 0);
+    const AXIS_Y = new THREE.Vector3(0, 1, 0);
+    const AXIS_Z = new THREE.Vector3(0, 0, 1);
+
+    function rpyToQuaternion(roll, pitch, yaw, target) {
+      target.identity();
+      target.setFromAxisAngle(AXIS_X, roll);
+      const q = new THREE.Quaternion();
+      q.setFromAxisAngle(AXIS_Y, pitch);
+      target.premultiply(q);
+      q.setFromAxisAngle(AXIS_Z, yaw);
+      target.premultiply(q);
+      return target;
+    }
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x12161c);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    document.getElementById('app').appendChild(renderer.domElement);
+
+    // URDF / ROS 约定是 Z 轴朝上。
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 20);
+    camera.up.set(0, 0, 1);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+    const key = new THREE.DirectionalLight(0xffffff, 1.6);
+    key.position.set(0.8, -0.9, 1.4);
+    scene.add(key);
+    const fill = new THREE.DirectionalLight(0xffffff, 0.8);
+    fill.position.set(-1.0, 0.8, 0.4);
+    scene.add(fill);
+
+    // 每个 link（= 每个关节的机体）一种颜色，一眼能看出是哪一节在动。
+    const LINK_COLORS = {
+      base_link: 0x5c6b7a,
+      first_Link: 0x2e86de,
+      second_Link: 0xf5a623,
+      third_Link: 0x27ae60,
+      fourth_Link: 0x9b59b6,
+      fifth_Link: 0xe74c3c,
+    };
+
+    // 地面网格：URDF/ROS 约定 Z 轴朝上，而 GridHelper 默认铺在 XZ 平面，
+    // 所以绕 X 转 90° 铺到 XY 平面，z=0 正好是底座底面。
+    const grid = new THREE.GridHelper(1.2, 24, 0x3d5875, 0x24313f);
+    grid.rotation.x = Math.PI / 2;
+    scene.add(grid);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.12;
+    controls.target.set(0, -0.1, 0.2);
+
+    // 每个 revolute 关节一个节点，顺序 = URDF 里出现的顺序 = 电机 ID1~ID5。
+    // `lo/hi` 是该关节的**机械限位**（URDF <limit>）：CAD 里两个零件接触的位置。
+    const jointNodes = [];
+    let pendingQ = null;
+    let ready = false;
+    let clampedJoints = [];
+
+    // 最后一次**拿到可用关节角**的时刻（0 = 从未拿到），单位 ms。
+    // ⚠️ 这是「3D 看着正常、其实是假象」的唯一告警口：页面在收到 setJoints 之前，
+    //    所有关节都停在初始姿态（全 0），渲染出来的正是 **URDF 的软件零位**；
+    //    真机停在别的位形时，看起来就像「仿真在软件零位、真机在初始零位」。
+    //    2026-10-09 实机就因此误判过，所以必须把状态直接写在画面上。
+    let lastQAt = 0;
+    // App 侧是 10Hz 推、且只在角度变化时才推，静止时本来就不推 —— 阈值不能太小。
+    const STALE_MS = 2000;
+    let lastHintAt = 0;
+    let hintText = '';
+    let hintWarn = false;
+
+    const hintEl = document.getElementById('hint');
+    const HINT_BASE = '单指拖动旋转 · 双指缩放 · 双击空白处复位视角';
+
+    function dataStatus() {
+      if (!ready) return '模型加载中…';
+      if (!lastQAt) {
+        return '未收到关节数据 —— 3D 停在 URDF 初始姿态，不代表真机'
+          + '（检查 App 是否已连上服务端；服务端缺 sign/m0 映射时也不会下发关节角）';
+      }
+      const ageMs = performance.now() - lastQAt;
+      if (ageMs > STALE_MS) {
+        return '关节数据已停止 ' + (ageMs / 1000).toFixed(0) + 's —— 显示的不是真机姿态';
+      }
+      return '';
+    }
+
+    function updateHint() {
+      const parts = [HINT_BASE];
+      if (clampedJoints.length) parts.push('已达机械限位：J' + clampedJoints.join(' J'));
+      const st = dataStatus();
+      if (st) parts.push(st);
+      const text = parts.join('　|　');
+      if (text !== hintText) {
+        hintText = text;
+        hintEl.textContent = text;
+      }
+      if (!!st !== hintWarn) {
+        hintWarn = !!st;
+        hintEl.classList.toggle('warn', hintWarn);
+      }
+    }
+
+    function wrapPi(v) {
+      return v - 2 * Math.PI * Math.round(v / (2 * Math.PI));
+    }
+
+    // ⚠️ 必须按机械限位钳制，不能原样套用服务端给的 q。
+    // 电机读数换算出的关节角（q = sign×(pos−m0)）在实机上会**略微越出** URDF 限位
+    // ——最典型的是失能后臂靠自重停在机械挡块上时（实测 ID2 超上限 0.23 rad、
+    // ID3 超下限 0.31 rad，根源是 m0 来自重力前馈辨识、不是运动学零位标定）。
+    // 原样套用会把上臂/腕部转进底座（ID1 电机那一段）里，就是看到的「穿模」。
+    // 钳制后模型**停在接触位置**，等价于真机「碰到即顶住不动」的硬限位行为。
+    function applyAngles(arr) {
+      clampedJoints = [];
+      for (let i = 0; i < jointNodes.length; i++) {
+        const v = arr[i];
+        if (typeof v !== 'number' || !isFinite(v)) continue;
+        const j = jointNodes[i];
+        const w = wrapPi(v);
+        let a = w;
+        if (j.lo !== null && w < j.lo) a = j.lo;
+        else if (j.hi !== null && w > j.hi) a = j.hi;
+        if (a !== w) clampedJoints.push(i + 1);
+        j.node.quaternion.setFromAxisAngle(j.axis, a);
+      }
+      updateHint();
+    }
+
+    // Kotlin 侧 10Hz 推关节角（单位 rad，URDF 关节角 q = sign×(pos−m0)）。
+    window.setJoints = function (arr) {
+      if (!Array.isArray(arr)) return;
+      pendingQ = arr;
+      // 只有真带回至少一个可用角度才算「有数据」—— 服务端缺 sign/m0 映射时
+      // 会把 q 发成 null，那一帧必须一并判掉，否则会误报成「数据正常」。
+      if (arr.some((v) => typeof v === 'number' && isFinite(v))) {
+        lastQAt = performance.now();
+      }
+      if (ready) applyAngles(arr);
+    };
+
+    function parseVec(str, fallback) {
+      if (!str) return fallback.slice();
+      const parts = str.trim().split(/\s+/).map(Number);
+      if (parts.length !== 3 || parts.some((v) => !isFinite(v))) return fallback.slice();
+      return parts;
+    }
+
+    // <limit lower="..." upper="..."> 缺省或非法时返回 null（= 不钳制该侧）。
+    function parseLimit(el, attr) {
+      const v = el && el.getAttribute(attr);
+      if (v === null || v === undefined || v === '') return null;
+      const n = Number(v);
+      return isFinite(n) ? n : null;
+    }
+
+    // package://<pkg>/meshes/xxx.STL  ->  ../meshes/xxx.STL（assets 里已拍平成一个目录）
+    function meshUrl(filename) {
+      const base = filename.split('/').pop();
+      return '../meshes/' + base;
+    }
+
+    function parseUrdf(text) {
+      const doc = new DOMParser().parseFromString(text, 'application/xml');
+      if (doc.querySelector('parsererror')) throw new Error('URDF XML 解析失败');
+
+      const links = {};
+      doc.querySelectorAll('robot > link').forEach((el) => { links[el.getAttribute('name')] = el; });
+
+      const joints = [];
+      doc.querySelectorAll('robot > joint').forEach((el) => {
+        const origin = el.querySelector(':scope > origin');
+        const axisEl = el.querySelector(':scope > axis');
+        const limitEl = el.querySelector(':scope > limit');
+        joints.push({
+          name: el.getAttribute('name'),
+          type: el.getAttribute('type'),
+          parent: el.querySelector(':scope > parent').getAttribute('link'),
+          child: el.querySelector(':scope > child').getAttribute('link'),
+          xyz: parseVec(origin && origin.getAttribute('xyz'), [0, 0, 0]),
+          rpy: parseVec(origin && origin.getAttribute('rpy'), [0, 0, 0]),
+          axis: parseVec(axisEl && axisEl.getAttribute('xyz'), [1, 0, 0]),
+          lo: parseLimit(limitEl, 'lower'),
+          hi: parseLimit(limitEl, 'upper'),
+        });
+      });
+
+      const childLinks = new Set(joints.map((j) => j.child));
+      const rootName = Object.keys(links).find((n) => !childLinks.has(n));
+      if (!rootName) throw new Error('URDF 找不到根 link');
+      return { links, joints, rootName };
+    }
+
+    const loader = new STLLoader();
+    const meshCache = new Map();
+
+    function loadMesh(url) {
+      if (!meshCache.has(url)) {
+        meshCache.set(url, new Promise((resolve) => {
+          loader.load(url, resolve, undefined, (err) => {
+            console.warn('mesh 加载失败', url, err);
+            resolve(null);
+          });
+        }));
+      }
+      return meshCache.get(url);
+    }
+
+    async function buildVisuals(linkEl, linkGroup) {
+      const visuals = linkEl.querySelectorAll(':scope > visual');
+      const linkName = linkEl.getAttribute('name');
+      for (const visual of visuals) {
+        const meshEl = visual.querySelector('geometry > mesh');
+        if (!meshEl) continue;
+        const geometry = await loadMesh(meshUrl(meshEl.getAttribute('filename')));
+        if (!geometry) continue;
+        geometry.computeVertexNormals();
+
+        // 颜色按 link 给（同一 link 的多个 visual 同色），不再用 URDF 里那套
+        // 大片重复的青白色 —— 一节能和另一节区分开才好看出是哪一节在动。
+        const colorEl = visual.querySelector('material > color');
+        const rgba = parseVec(colorEl && colorEl.getAttribute('rgba'), [0.72, 0.74, 0.78]);
+        const tint = LINK_COLORS[linkName];
+        const material = new THREE.MeshStandardMaterial({
+          color: tint === undefined ? new THREE.Color(rgba[0], rgba[1], rgba[2]) : tint,
+          metalness: 0.35,
+          roughness: 0.55,
+        });
+
+        const mesh = new THREE.Mesh(geometry, material);
+        // visual 自己的 origin：本项目里末端两个 link 不是 0，必须照搬。
+        const vorigin = visual.querySelector(':scope > origin');
+        mesh.position.fromArray(parseVec(vorigin && vorigin.getAttribute('xyz'), [0, 0, 0]));
+        const vrpy = parseVec(vorigin && vorigin.getAttribute('rpy'), [0, 0, 0]);
+        rpyToQuaternion(vrpy[0], vrpy[1], vrpy[2], mesh.quaternion);
+        linkGroup.add(mesh);
+      }
+    }
+
+    async function buildLink(name, parentObj, ctx) {
+      const linkGroup = new THREE.Group();
+      linkGroup.name = name;
+      parentObj.add(linkGroup);
+
+      const linkEl = ctx.links[name];
+      if (linkEl) await buildVisuals(linkEl, linkGroup);
+
+      for (const joint of ctx.joints.filter((j) => j.parent === name)) {
+        const originGroup = new THREE.Group();
+        originGroup.position.fromArray(joint.xyz);
+        rpyToQuaternion(joint.rpy[0], joint.rpy[1], joint.rpy[2], originGroup.quaternion);
+        linkGroup.add(originGroup);
+
+        const axisGroup = new THREE.Group();
+        originGroup.add(axisGroup);
+        if (joint.type === 'revolute' || joint.type === 'continuous') {
+          jointNodes.push({
+            node: axisGroup,
+            axis: new THREE.Vector3().fromArray(joint.axis).normalize(),
+            lo: joint.lo,
+            hi: joint.hi,
+          });
+        }
+        await buildLink(joint.child, axisGroup, ctx);
+      }
+    }
+
+    function fitCamera(obj) {
+      const box = new THREE.Box3().setFromObject(obj);
+      if (box.isEmpty()) return;
+      const sphere = box.getBoundingSphere(new THREE.Sphere());
+      const dist = Math.max(sphere.radius * 2.3, 0.4);
+      const dir = new THREE.Vector3(0.55, -0.75, 0.5).normalize();
+      camera.position.copy(sphere.center).addScaledVector(dir, dist);
+      camera.near = Math.max(dist / 100, 0.005);
+      camera.far = dist * 20;
+      camera.updateProjectionMatrix();
+      controls.target.copy(sphere.center);
+      controls.update();
+      // 「原始视角」= 首帧自动取景的结果，双击时回到这里。
+      camHome = { pos: camera.position.clone(), target: controls.target.clone() };
+    }
+
+    // 双击（含触屏双击）空白处：平滑回到 camHome。
+    let camHome = null;
+    let camAnim = null;
+    const RESET_MS = 420;
+
+    function resetView() {
+      if (!camHome) return;
+      camAnim = {
+        t0: performance.now(),
+        pos: camera.position.clone(),
+        target: controls.target.clone(),
+      };
+    }
+
+    // Android WebView 里 touch 序列不一定派发 dblclick，统一用「两次快速点按」判定；
+    // 鼠标双击同样是两次快速 pointerdown/up，走同一条路径。
+    let lastTap = { t: 0, x: 0, y: 0 };
+    renderer.domElement.addEventListener('pointerup', (e) => {
+      const now = performance.now();
+      const near = Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 24;
+      if (now - lastTap.t < 320 && near) {
+        lastTap.t = 0;
+        resetView();
+        return;
+      }
+      lastTap = { t: now, x: e.clientX, y: e.clientY };
+    });
+
+    function resize() {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      // 必须让 three.js 同时更新 canvas 的 CSS 尺寸（第三个参数保持 true）。
+      // setPixelRatio(2) 后 backing store 是 2 倍，若只改 backing 不改 style，
+      // canvas 会按 2 倍尺寸溢出 WebView，画面只剩左上角 1/4（看着像特写）。
+      renderer.setSize(w, h);
+      camera.aspect = w / Math.max(h, 1);
+      camera.updateProjectionMatrix();
+    }
+    window.addEventListener('resize', resize);
+
+    function animate() {
+      requestAnimationFrame(animate);
+      if (camAnim && camHome) {
+        const k = Math.min(1, (performance.now() - camAnim.t0) / RESET_MS);
+        const e = k * k * (3 - 2 * k);   // smoothstep，起步和收尾都不生硬
+        camera.position.lerpVectors(camAnim.pos, camHome.pos, e);
+        controls.target.lerpVectors(camAnim.target, camHome.target, e);
+        if (k >= 1) camAnim = null;
+      }
+      controls.update();
+      renderer.render(scene, camera);
+      // 4Hz 复核一次提示文案：模型加载完 / 数据断了都要能自己反映出来。
+      // 不能只靠 setJoints 触发 —— 否则「一直没收到数据」这条永远不更新。
+      if (performance.now() - lastHintAt > 250) {
+        lastHintAt = performance.now();
+        updateHint();
+      }
+    }
+
+    (async () => {
+      try {
+        const res = await fetch('../urdf/URDF_armv001_a3tip.urdf');
+        if (!res.ok) throw new Error('URDF HTTP ' + res.status);
+        const ctx = parseUrdf(await res.text());
+        const root = new THREE.Group();
+        scene.add(root);
+        await buildLink(ctx.rootName, root, ctx);
+        fitCamera(root);
+        ready = true;
+        if (pendingQ) applyAngles(pendingQ);
+        window.viewerStatus = 'ready:joints=' + jointNodes.length;
+      } catch (e) {
+        window.viewerStatus = 'error:' + (e && e.message ? e.message : e);
+        console.error('URDF 视窗初始化失败', e);
+      }
+    })();
+
+    resize();
+    animate();
+  </script>
+</body>
+</html>

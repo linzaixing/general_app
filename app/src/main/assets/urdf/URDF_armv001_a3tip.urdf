@@ -1,0 +1,448 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ============================================================================
+  URDF_armv001_a3tip —— 自研六轴臂 + EDULITE_A3 末端（一体化末端）
+  ============================================================================
+  来源
+  ────
+  臂本体： F:\Robot\URDF_robot\DeepDiaryRos\src\URDF_armv001\urdf\URDF_armv001.urdf
+          （SolidWorks 导出，原文件保持不动，本文件是它的本地副本）
+  末端：   F:\Robot\URDF_robot\EDULITE_A3\el_a3_sdk\resources\urdf\el_a3.urdf
+
+  实机结构（本文件的建模依据）
+  ────────────────────────────
+  实机 = 5 个臂关节 + 1 个夹爪，共 6 个电机，末端到 fifth_Link 为止：
+    ID1 base_link → ID2 first_Link → ID3 second_Link
+    → ID4 third_Link → ID5 fourth_Link → ID6 夹爪(第五轴上挂 EL05 总成 + jaw)
+
+  为什么要改
+  ──────────
+  1. 原 URDF 有 6 个 revolute 关节，其中 `sixth_joint`（±3.14 rad 的"腕部旋转"）
+     在实机上**没有对应电机**，属于多余自由度，会让 joint_map 无法唯一确定。
+  2. 首版替换把 A3 末端拆成 `fifth_Link` + `a3_l6_motor` + `a3_gripper_jaw`
+     三个体块，渲染出来末端会看到 3 个"电机"（绿=fifth_Link、红=EL05 圆柱、
+     橙=夹爪），比实机多 2 个。
+
+  改了什么（2026-09-29 第二次修正：末端只留"6 号电机"）
+  ──────────────────────────────────────────────────
+  · 删除 `sixth_joint` / `sixth_Link`（实机无此自由度）
+  · 删除 `a3_l6_motor` link（渲染里的红色 EL05 圆柱，"7 号电机"）与其 fixed 关节
+    `tip_mount_joint`
+  · 删除 `a3_gripper_jaw` link（"8 号电机"）与其 fixed 关节 `a3_gripper_joint`
+  · **保留 `fifth_Link`**（"6 号电机"，实机 ID5 腕部机体）：它仍是本 URDF 的末端
+    link，`fifth_joint` 的 child 就是它，origin/axis/limit 与原始 URDF 完全一致
+  · 夹爪几何 `jaw.stl` 并入 `fifth_Link`，作为本 link 的第二个 visual/collision：
+    由原厂装配位置沿 −Y 平移 0.106 m（即被删掉的 EL05 圆柱长度），
+    直接贴在腕部机体末端，视觉上连续、不再悬空
+  · `fifth_Link` 的惯性 = 原 fifth_Link(0.37 kg) + EL05 电机(0.657292 kg)
+    + 夹爪(0.05 kg) 的合并值（并行轴定理），合计 1.077292 kg
+  · 末尾补一个**无 mesh、无质量**的隐藏 link `tool_tcp`（`fifth_Link` 下、fixed
+    关节）：它只为笛卡尔逆解提供一个工具坐标系，渲染里不出现、不增加任何机体
+
+  ⚠️ 已知近似
+  ──────────
+  · EL05 末端电机那 0.657 kg **仍计入质量**：实机上它是 ID6 夹爪的驱动电机、
+    确实存在，这里只删掉它的渲染网格；若连质量一起删，ID3/ID5 的重力前馈
+    会严重低估。
+  · 夹爪开合（ID6）不建模：开合对 ID2/ID3 的重力力矩影响 ≤0.06 N·m，
+    且 ID6 不参与重力补偿映射。
+  · 末端相机、线缆、紧固件的质量仍**未计入**，真实 ID3 重力需求可能比本文件更大。
+  · URDF 惯量是厂商标称理论值 + 合并近似，最终必须用 `arm_control.gravity` 的
+    静态辨识（StaticGravityIdentifier）以实机力矩反馈重新标定。
+
+  本文件只需惯性信息即可被 Pinocchio 加载；visual/collision 仅为可读性保留。
+  ============================================================================
+-->
+<robot
+  name="URDF_armv001_a3tip">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="0.00012503 1.4745E-05 0.026752"
+        rpy="0 0 0" />
+      <mass
+        value="1.81" />
+      <inertia
+        ixx="0.00055145"
+        ixy="1.5556E-06"
+        ixz="1.4779E-06"
+        iyy="0.0010327"
+        iyz="8.2802E-08"
+        izz="0.0014616" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_armv001/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0 0.94118 0.98824 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_armv001/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="first_Link">
+    <inertial>
+      <origin
+        xyz="0.0019709 -3.7688E-05 0.045814"
+        rpy="0 0 0" />
+      <mass
+        value="1.05" />
+      <inertia
+        ixx="0.00020197"
+        ixy="-1.66E-08"
+        ixz="2.2663E-07"
+        iyy="0.0001125"
+        iyz="7.8462E-08"
+        izz="0.0001431" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_armv001/meshes/first_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_armv001/meshes/first_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="first_joint"
+    type="revolute">
+    <origin
+      xyz="0 0 0.0785000000000001"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="first_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-3.14"
+      upper="3.14"
+      effort="160"
+      velocity="20.417" />
+  </joint>
+  <link
+    name="second_Link">
+    <inertial>
+      <origin
+        xyz="0.000857573444558835 0.0776042459103315 0.130616624503666"
+        rpy="0 0 0" />
+      <mass
+        value="0.966" />
+      <inertia
+        ixx="0.00246169175712987"
+        ixy="7.15160471159471E-06"
+        ixz="1.14970999493612E-05"
+        iyy="0.00149301141014258"
+        iyz="-0.00107551298210178"
+        izz="0.0010159642390867" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_armv001/meshes/second_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0 0.941176470588235 0.988235294117647 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_armv001/meshes/second_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="second_joint"
+    type="revolute">
+    <origin
+      xyz="0 0 0.0614999999999968"
+      rpy="0 0 0" />
+    <parent
+      link="first_Link" />
+    <child
+      link="second_Link" />
+    <axis
+      xyz="-1 0 0" />
+    <limit
+      lower="-2.15"
+      upper="1.26"
+      effort="60"
+      velocity="20.4165" />
+  </joint>
+  <link
+    name="third_Link">
+    <inertial>
+      <origin
+        xyz="0.00167558365991412 -0.116252462462107 0.0252492816668452"
+        rpy="0 0 0" />
+      <mass
+        value="0.69" />
+      <inertia
+        ixx="0.000582679607750313"
+        ixy="-1.4662142928383E-05"
+        ixz="1.94509615851066E-06"
+        iyy="7.33395566734886E-05"
+        iyz="4.46085226928446E-05"
+        izz="0.000553919549010076" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_armv001/meshes/third_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0 0.941176470588235 0.988235294117647 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_armv001/meshes/third_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="third_joint"
+    type="revolute">
+    <origin
+      xyz="0 0.165989898732231 0.257913780286487"
+      rpy="0 0 0" />
+    <parent
+      link="second_Link" />
+    <child
+      link="third_Link" />
+    <axis
+      xyz="-1 0 0" />
+    <limit
+      lower="-0.75"
+      upper="2.38"
+      effort="17"
+      velocity="32.9805" />
+  </joint>
+  <link
+    name="fourth_Link">
+    <inertial>
+      <origin
+        xyz="3.0956E-05 -0.027807 -7.0032E-05"
+        rpy="0 0 0" />
+      <mass
+        value="0.37" />
+      <inertia
+        ixx="3.2899E-05"
+        ixy="2.5288E-06"
+        ixz="-2.3777E-08"
+        iyy="2.1257E-05"
+        iyz="1.4904E-07"
+        izz="2.1529E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_armv001/meshes/fourth_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0 0.94118 0.98824 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_armv001/meshes/fourth_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="fourth_joint"
+    type="revolute">
+    <origin
+      xyz="0 -0.247999999999997 0.0289999999999987"
+      rpy="0 0 0" />
+    <parent
+      link="third_Link" />
+    <child
+      link="fourth_Link" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="-3.14"
+      upper="3.14"
+      effort="14"
+      velocity="32.9805" />
+  </joint>
+  <!-- ======================================================================
+       第五轴（ID5）：fifth_Link —— 实机 ID5 腕部机体（渲染里的"6 号电机"）。
+       A3 的 EL05 电机 + 夹爪与它刚性一体，本文件只保留第五轴这一个末端 link。
+       ====================================================================== -->
+  <link
+    name="fifth_Link">
+    <inertial>
+      <!-- 合并惯量 = 原 fifth_Link(0.37) + 原 a3_l6_motor(0.657292)
+           + 原 a3_gripper_jaw(0.05)，以本 link 的坐标系为基准（并行轴定理） -->
+      <origin
+        xyz="0.000379122 -0.034707921 -0.000140295"
+        rpy="0 0 0" />
+      <mass
+        value="1.077292" />
+      <inertia
+        ixx="0.002524054"
+        ixy="0.000018047"
+        ixz="-0.000014035"
+        iyy="0.000745614"
+        iyz="0.000007687"
+        izz="0.002976356" />
+    </inertial>
+    <!-- 本体（原 fifth_Link.STL） -->
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_armv001/meshes/fifth_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.317647058823529 0.635294117647059 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_armv001/meshes/fifth_Link.STL" />
+      </geometry>
+    </collision>
+    <!-- 夹爪（原厂 jaw.stl。在 el_a3.urdf 里它与 el05_l6.stl 同挂 l5_l6_urdf_asm、
+         同一 visual origin，轴向 z∈[-0.2095,-0.106] 紧接电机 z∈[-0.106,0]）：
+         本文件删掉 EL05 电机那段（长 0.106 m）后，把夹爪直接贴到腕部机体末端——
+         xyz = 原位置 (-0.001,-0.1625,0) 沿 -Y 平移 0.106 → (-0.001,-0.0565,0)，
+         rpy 仍取 +1.5708（A3 的 +Z 已旋到本臂 +Y，见上方第五轴说明）。 -->
+    <visual>
+      <origin
+        xyz="-0.001 -0.0565 0"
+        rpy="1.5708 0 0" />
+      <geometry>
+        <mesh
+          filename="package://el_a3_description/meshes/jaw.stl" />
+      </geometry>
+      <material
+        name="orange">
+        <color
+          rgba="0.972549 0.529412 0.00392157 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="-0.001 -0.0565 0"
+        rpy="1.5708 0 0" />
+      <geometry>
+        <mesh
+          filename="package://el_a3_description/meshes/jaw.stl" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="fifth_joint"
+    type="revolute">
+    <!-- 与原始 URDF 完全一致：ID5 的安装点、转轴、限位都没动 -->
+    <origin
+      xyz="0 -0.036 0"
+      rpy="0 0 0" />
+    <parent
+      link="fourth_Link" />
+    <child
+      link="fifth_Link" />
+    <axis
+      xyz="-1 0 0" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="14"
+      velocity="32.9805" />
+  </joint>
+  <!-- ======================================================================
+       工具坐标系 `tool_tcp` —— **无 mesh、无质量**的纯参考系，渲染不可见。
+       为什么要它：笛卡尔逆解需要一个"工具点"，而 URDF 里只有 link / 关节能给出
+       坐标系。若直接拿 `fifth_Link` 当工具点，它的原点正好落在第五轴转轴上
+       （且与第四轴轴线共面），于是"第四轴转、工具点却几乎不动、转角又不落在
+       任务所测的自转/俯仰两轴上"——任务雅可比在零位降秩，σ_min=0，进门门禁
+       会永远拒绝切进笛卡尔模式（arm_web 自检实测 8 项失败）。
+       这里复刻 v1.0.4 所用工具点（A 案 `a3_gripper_jaw` 帧）相对第五轴的位姿：
+       xyz=(-0.001, +0.049, 0)、rpy=(-1.5708, 0, 0) —— 笛卡尔遥操作的行为与
+       v1.0.4 完全一致，不引入任何未要求的变化。
+       ====================================================================== -->
+  <link
+    name="tool_tcp" />
+  <joint
+    name="tool_tcp_joint"
+    type="fixed">
+    <origin
+      xyz="-0.001 0.049 0"
+      rpy="-1.5708 0 0" />
+    <parent
+      link="fifth_Link" />
+    <child
+      link="tool_tcp" />
+  </joint>
+</robot>

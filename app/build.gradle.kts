@@ -13,8 +13,8 @@ android {
         applicationId = "com.robotx.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 20
+        versionName = "1.0.15"
 
         vectorDrawables.useSupportLibrary = true
     }
@@ -101,6 +101,10 @@ dependencies {
 
     // Coil for image loading
     implementation("io.coil-kt:coil-compose:2.7.0")
+
+    // URDF 3D 视窗：WebViewAssetLoader 把 assets 托管到
+    // https://appassets.androidplatform.net/assets/... ，绕开 file:// 下 fetch 被禁的问题。
+    implementation("androidx.webkit:webkit:1.11.0")
 
     // Accompanist permissions (optional helper)
     implementation("com.google.accompanist:accompanist-permissions:0.34.0")
