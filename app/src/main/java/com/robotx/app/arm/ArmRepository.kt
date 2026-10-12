@@ -4,6 +4,8 @@ import com.robotx.app.arm.model.ArmFrame
 import com.robotx.app.arm.model.ArmLinkState
 import com.robotx.app.arm.model.ArmLogLine
 import com.robotx.app.arm.model.ArmStateDto
+import com.robotx.app.arm.model.GraspNotice
+import com.robotx.app.arm.model.GraspResultDto
 import com.robotx.app.arm.model.TempPopup
 import com.robotx.app.arm.model.TrajFileDto
 import com.robotx.app.arm.transport.ArmEndpoint
@@ -66,6 +68,10 @@ object ArmRepository {
 
     private val _tempPopup = MutableStateFlow<TempPopup?>(null)
     val tempPopup: StateFlow<TempPopup?> = _tempPopup.asStateFlow()
+
+    /** 夹爪闭合抓取检测结果（主界面状态行短暂显示；TTS 在 [onGraspResult] 里播）。 */
+    private val _graspResult = MutableStateFlow<GraspNotice?>(null)
+    val graspResult: StateFlow<GraspNotice?> = _graspResult.asStateFlow()
 
     private val _trajFiles = MutableStateFlow<List<TrajFileDto>>(emptyList())
     val trajFiles: StateFlow<List<TrajFileDto>> = _trajFiles.asStateFlow()
@@ -181,6 +187,13 @@ object ArmRepository {
      *
      * 服务端进门有多条门禁（未使能 / 缺 sign-m0 / 末端在盒外 / 逆解不可用），
      * 拒绝时只写日志不回包 —— 失败原因要靠 [logs] 里的 warn 呈现。
+     *
+     * 真机进门会先限速回软件零位（可达数秒）：期间快照 `cart_mode=false` 且
+     * `cart_entering=true`。因此 UI 的模式显示**完全以快照 `cart_mode` 为准**，
+     * 本方法只发消息、绝不本地翻转模式状态 —— 否则回零期间的快照会把 UI 顶回
+     * 「方向控制关」，用户得再点一次（v1.0.15 真机反馈的根因）；
+     * 「切换中 / 回零中」过渡态由 `cart_entering` + UI 本地 pending 驱动
+     * （见 DirectionCard）。
      */
     fun setCartMode(on: Boolean) {
         send(buildJsonObject {
@@ -190,13 +203,20 @@ object ArmRepository {
     }
 
     /**
-     * 方向点动一帧（按住期间 20Hz）。
+     * 方向点动一帧（按住期间固定 30Hz 连发，v1.1.0 从 20Hz 提频 —— 见
+     * [JoyJogEffect] / [JOG_INTERVAL_MS] 的排查结论）。
      *
-     * 方向语义严格照服务端 `_cart_tick`，**不可弄反**：
-     * 前 = `ly:-1`（远离基座）、后 = `ly:+1`、左 = `lx:+1`、右 = `lx:-1`；
-     * 高度 = `ry` —— 服务端的 Z 增量是 `dp.z = -ry * scale`，
-     * 所以 **`ry:+1` = 下降、`ry:-1` = 上升**（与网页版右摇杆「末端升降」同一路）。
-     * 姿态轴（rx/hx）本 App 恒为 0。
+     * 方向语义严格照服务端 `_cart_tick`（`vx = (-ly)*u_r + lx*u_t`、`dp.z = -ry*scale`），
+     * **最终符号约定（2026-10-11 定案，与服务端/网页版手柄逐项核对一致，改动须三端同步）**：
+     *  - 推上 = `ly:-1` = 径向**远离基座**；推下 = `ly:+1` = 朝向基座。
+     *  - 推右 = `lx:+1` = 切向绕基座**俯视逆时针**；推左 = `lx:-1` = 俯视顺时针。
+     *    这是极坐标映射：切向是「绕基座回转」，与末端当前方位角无关。服务端
+     *    `u_t = (-u_ry, u_rx)`（u_r 逆时针旋 90°），与网页版手柄 `lx: dz(ax(0))`
+     *    原始轴完全一致 —— 网页 / 真机 / 本 App 三端同向。
+     *  - 高度 = `ry`：**`ry:+1` = 下降、`ry:-1` = 上升**（服务端 `dp.z = -ry*scale`）。
+     *    升降轮盘「顶 = 升 / 底 = 降」对齐这一条（见 JoyPad.HeightSlider）。
+     * 姿态轴（rx/hx）本 App 恒为 0（IK 动作集只有平面前后左右 + 升降 + 夹爪，
+     * 服务端对 rx/hx 也恒按 0 下发）。
      *
      * 门禁拒绝时服务端只写日志不回包，所以「推不动」的唯一反馈是日志流。
      */
@@ -211,6 +231,42 @@ object ArmRepository {
                 put("hx", 0.0)
                 put("hy", 0.0)
             })
+            put("dt", dt.coerceIn(MIN_JOG_DT, MAX_JOG_DT))
+            put("factor", factor.coerceIn(0.0, 1.0))
+        })
+    }
+
+    /**
+     * 开/关定点旋转（RCM）模式（v1.2.0）：末端姿态绕**进入时刻的夹爪尖端**旋转，
+     * 该固定点在空间中不动 —— 适合「盯着同一个点拧转工具」的操作。
+     *
+     * 与方向控制（笛卡尔）互斥：进门时服务端会先正式退出笛卡尔（反之亦然）。
+     * 门禁复用进笛卡尔的那一套（未使能 / 缺 sign-m0 / 逆解不可用 / 位形病态），
+     * 拒绝时只写日志不回包 —— 失败原因看 [logs]。
+     * 模式显示**完全以快照 `rcm_mode` 为准**，本方法只发消息、绝不本地翻转
+     * （与 [setCartMode] 同一条纪律）。
+     */
+    fun setRcmMode(on: Boolean) {
+        send(buildJsonObject {
+            put("type", "set_rcm_mode")
+            put("on", on)
+        })
+    }
+
+    /**
+     * 定点旋转一帧（按住期间固定 30Hz 连发，见 [JoyJogEffect]）。
+     *
+     * [droll] / [dpitch] 是本帧角增量（rad），客户端限速 **±1.0 rad/s**（服务端
+     * `RCM_ANG_VEL` 同值，还会再钳一次）：轮盘 X → [droll]（工具自转 roll）、
+     * 轮盘 Y → [dpitch]（绕工具局部 X 俯仰；推上 = 正，与 cart 的「推上=远离基座」
+     * 一样由 UI 取反轴值实现）。服务端在 RCM 下**只认 rcm_jog** —— 方向轮盘的
+     * cart_jog 语义不再生效（发了也会被服务端忽略），高度滑条同样无效。
+     */
+    fun rcmJog(droll: Double, dpitch: Double, dt: Double, factor: Double) {
+        send(buildJsonObject {
+            put("type", "rcm_jog")
+            put("droll", droll)
+            put("dpitch", dpitch)
             put("dt", dt.coerceIn(MIN_JOG_DT, MAX_JOG_DT))
             put("factor", factor.coerceIn(0.0, 1.0))
         })
@@ -319,6 +375,7 @@ object ArmRepository {
             is ArmFrame.State -> onState(frame.value)
             is ArmFrame.Log -> appendLog(frame.value.level, frame.value.msg)
             is ArmFrame.TempAlarm -> onTempAlarm(frame.value.level, frame.value.text, frame.value.ids, frame.value.threshold)
+            is ArmFrame.GraspResult -> onGraspResult(frame.value)
             is ArmFrame.TrajList -> _trajFiles.value = frame.files
             is ArmFrame.Unknown -> Unit
         }
@@ -350,6 +407,27 @@ object ArmRepository {
         // 温度报警只闪不响很容易漏 —— 操作者的眼睛多半在机械臂上，不在屏幕上。
         // 20s 冷却已经在上面挡过，所以这里不会变成复读机。
         VoiceManager.speak("警告，电机温度过高，请降低负载或暂停使用", urgent = true)
+    }
+
+    /**
+     * 夹爪闭合抓取检测结果（服务端 `grasp_result` 事件，2026-10-13）：
+     * 写入 [graspResult] 供主界面状态行短暂显示，并 TTS 播报 —— 合爪时操作者
+     * 多半在看机械臂末端的夹取效果，用耳朵确认「夹没夹到」最直接。
+     * 播报用 `urgent=false`（QUEUE_ADD 排队）：结果不紧急，不要打断别的播报。
+     */
+    private fun onGraspResult(r: GraspResultDto) {
+        val spoken = when (r.grasped) {
+            true -> "抓取成功"
+            false -> "未检测到物体，夹爪已闭合"
+            null -> "夹爪状态未知"
+        }
+        _graspResult.value = GraspNotice(
+            grasped = r.grasped,
+            text = r.text.ifBlank { spoken },
+            atMs = System.currentTimeMillis(),
+        )
+        appendLog("info", r.text.ifBlank { spoken })
+        VoiceManager.speak(spoken)
     }
 
     /** UI 在弹窗展示 5s 后调用。 */

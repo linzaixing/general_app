@@ -157,7 +157,7 @@ fun WelcomeScreen(
                     .clip(RoundedCornerShape(28.dp)),
             )
             Text(
-                text = "机械臂小助手",
+                text = "deeparm_console",
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
             )

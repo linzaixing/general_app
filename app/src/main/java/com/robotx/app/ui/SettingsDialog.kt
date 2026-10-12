@@ -57,7 +57,7 @@ fun SettingsDialog(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Text(
-                    text = "机械臂小助手  v${BuildConfig.VERSION_NAME}（build ${BuildConfig.VERSION_CODE}）",
+                    text = "deeparm_console  v${BuildConfig.VERSION_NAME}（build ${BuildConfig.VERSION_CODE}）",
                     style = MaterialTheme.typography.bodyMedium,
                 )
 

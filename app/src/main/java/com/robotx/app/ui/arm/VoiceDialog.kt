@@ -157,8 +157,10 @@ fun VoiceDialog(
     ) {
         Surface(
             modifier = Modifier
-                .fillMaxWidth(0.72f)
-                .fillMaxHeight(0.9f)
+                // v1.0.17：整体缩为原来的 2/3（宽 0.72→0.48、高 0.9→0.6）；
+                // 只缩容器，字号 / 内边距等内部元素不动。
+                .fillMaxWidth(0.48f)
+                .fillMaxHeight(0.6f)
                 .imePadding(),
             shape = RoundedCornerShape(20.dp),
             color = MaterialTheme.colorScheme.surface,
@@ -266,7 +268,8 @@ fun VoiceDialog(
 
                     result?.let {
                         // 识别结果区整体调小一档（v1.0.15：14→11sp / 12→10sp）：
-                        // 长回复在 0.72 屏宽的弹窗里两三行就折行，小一号更耐读。
+                        // 长回复在窄弹窗里两三行就折行，小一号更耐读。
+                        // （v1.0.17 弹窗再缩为 2/3 —— 0.48 屏宽 —— 字号维持这一档不变。）
                         Text(
                             "识别文本：${it.transcript.ifBlank { "-" }}",
                             style = MaterialTheme.typography.bodyMedium.copy(fontSize = 11.sp, lineHeight = 15.sp),

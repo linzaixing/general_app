@@ -97,6 +97,18 @@ data class ArmStateDto(
     @SerialName("heartbeat_age") val heartbeatAge: Double? = null,
     val compliant: Boolean = false,
     @SerialName("cart_mode") val cartMode: Boolean = false,
+    /**
+     * 服务端正在进入笛卡尔模式（`set_cart_mode(on=true)` 置位，进门成功/失败都清除）。
+     * 真机进门要先限速回软件零位（可达数秒），期间 `cart_mode` 仍是 false ——
+     * UI 必须据此显示「回零中…」并禁用切换开关，而不是把这段过程当成「点了没反应」。
+     */
+    @SerialName("cart_entering") val cartEntering: Boolean = false,
+    /**
+     * 定点旋转（RCM，Remote Center of Motion）模式（v1.2.0，2026-10-11）：末端姿态
+     * 绕**进入时刻的夹爪尖端**旋转、该固定点在空间中不动。与 [cartMode] 互斥
+     * （服务端进一个自动退另一个）；模式显示完全以本字段为准，开关只发请求。
+     */
+    @SerialName("rcm_mode") val rcmMode: Boolean = false,
     val teaching: String = "idle",
     val window: Double? = null,
     val kp: Double? = null,
@@ -135,6 +147,23 @@ data class TrajFileDto(
     val n: Int = 0,
     val ids: List<Int> = emptyList(),
     val notes: String = "",
+)
+
+/**
+ * 夹爪闭合抓取检测结果（服务端 `_monitor_gripper_grasp` 广播，2026-10-13）。
+ *
+ * [grasped] 三态：true=夹到 / false=未夹到 / null=未知（读不到 ID6 反馈或超时未稳定）。
+ */
+@Serializable
+data class GraspResultDto(
+    val type: String = "grasp_result",
+    val grasped: Boolean? = null,
+    /** 判定时的稳定位置（rad），未知时 null。 */
+    val pos: Double? = null,
+    /** 闭合过程中的最大 |扭矩|（N·m）。 */
+    val torque: Double? = null,
+    /** 服务端日志原文（「夹爪闭合：已夹到物体（稳定在 x.xx rad）」等）。 */
+    val text: String = "",
 )
 
 /** 服务端未知/暂未建模的消息，原样保留以便排查。 */
@@ -199,6 +228,7 @@ sealed interface ArmFrame {
     data class State(val value: ArmStateDto) : ArmFrame
     data class Log(val value: LogLineDto) : ArmFrame
     data class TempAlarm(val value: TempAlarmDto) : ArmFrame
+    data class GraspResult(val value: GraspResultDto) : ArmFrame
     data class TrajList(val files: List<TrajFileDto>) : ArmFrame
     data class Unknown(val value: UnknownFrame) : ArmFrame
 }
@@ -217,3 +247,9 @@ enum class ArmLinkState { IDLE, CONNECTING, ONLINE, RETRYING, CLOSED }
 
 /** 温度弹窗请求（20s 冷却在 [com.robotx.app.arm.ArmRepository] 内做）。 */
 data class TempPopup(val level: String, val text: String, val ids: List<Int>, val threshold: Double)
+
+/**
+ * 夹爪闭合抓取检测结果的通知（主界面状态行短暂显示 + TTS 播报的内容）。
+ * [atMs] 供 UI 做「显示 5s 后自动消失」。
+ */
+data class GraspNotice(val grasped: Boolean?, val text: String, val atMs: Long)

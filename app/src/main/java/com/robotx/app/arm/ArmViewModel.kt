@@ -22,6 +22,7 @@ class ArmViewModel : ViewModel() {
     val logs = ArmRepository.logs
     val link = ArmRepository.link
     val tempPopup = ArmRepository.tempPopup
+    val graspResult = ArmRepository.graspResult
     val trajFiles = ArmRepository.trajFiles
     val config = ArmConfig.state
 
@@ -119,6 +120,13 @@ class ArmViewModel : ViewModel() {
     /** 方向点动一帧，见 [ArmRepository.cartJog] 的方向与高度语义。 */
     fun cartJog(lx: Double, ly: Double, ry: Double, dt: Double, factor: Double) =
         ArmRepository.cartJog(lx, ly, ry, dt, factor)
+
+    /** 开/关定点旋转（RCM）模式，与方向控制互斥，见 [ArmRepository.setRcmMode]。 */
+    fun setRcmMode(on: Boolean) = ArmRepository.setRcmMode(on)
+
+    /** 定点旋转一帧（轮盘 X=roll / Y=pitch），见 [ArmRepository.rcmJog]。 */
+    fun rcmJog(droll: Double, dpitch: Double, dt: Double, factor: Double) =
+        ArmRepository.rcmJog(droll, dpitch, dt, factor)
 
     // ------------------------------------------------------------ 夹爪 / 示教 / 回放
 
