@@ -3,6 +3,7 @@ package com.robotx.app.arm.transport
 import com.robotx.app.arm.model.ArmFrame
 import com.robotx.app.arm.model.ArmLinkState
 import com.robotx.app.arm.model.ArmStateDto
+import com.robotx.app.arm.model.GraspResultDto
 import com.robotx.app.arm.model.LogLineDto
 import com.robotx.app.arm.model.TempAlarmDto
 import com.robotx.app.arm.model.TrajFileDto
@@ -119,6 +120,9 @@ class WsArmTransport(
                 "log" -> ArmFrame.Log(HttpClient.json.decodeFromJsonElement(LogLineDto.serializer(), obj))
                 "temp_alarm" -> ArmFrame.TempAlarm(
                     HttpClient.json.decodeFromJsonElement(TempAlarmDto.serializer(), obj)
+                )
+                "grasp_result" -> ArmFrame.GraspResult(
+                    HttpClient.json.decodeFromJsonElement(GraspResultDto.serializer(), obj)
                 )
                 "traj_list" -> ArmFrame.TrajList(
                     HttpClient.json.decodeFromJsonElement(TrajListEnvelope.serializer(), obj).files

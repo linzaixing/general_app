@@ -53,3 +53,9 @@ val EnableGreen = Color(0xFF2FD672)
 
 /** 急停红：全屏唯一的暖色块，安全键必须第一眼被看到。 */
 val RecordingRed = Color(0xFFFF4D5E)
+
+/**
+ * 急停深红：急停按钮的底色（v1.0.17）。圆底与八角形**同用此色**、中间不留白色区域，
+ * 只留白色 STOP 字 —— 比原来的「红圆 + 白八角」更沉、更像真实的工业急停标牌。
+ */
+val EstopDarkRed = Color(0xFF8B0000)

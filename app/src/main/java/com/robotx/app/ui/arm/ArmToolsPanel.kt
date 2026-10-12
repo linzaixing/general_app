@@ -28,6 +28,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -46,6 +47,7 @@ import com.robotx.app.arm.model.ArmLinkState
 import com.robotx.app.arm.model.ArmLogLine
 import com.robotx.app.ui.theme.EnableGreen
 import com.robotx.app.ui.theme.HudAmber
+import kotlinx.coroutines.delay
 
 /** 与服务端 `arm_control.vision.COLOR_PRESETS` 一致。 */
 private val COLOR_PRESETS = listOf("red", "orange", "yellow", "green", "blue")
@@ -99,10 +101,13 @@ fun ArmToolsPanel(
         DirectionCard(
             link = link,
             cartMode = state.cartMode,
+            cartEntering = state.cartEntering,
+            rcmMode = state.rcmMode,
             enabled = state.enabled,
             factor = factor,
             onFactor = onFactor,
             onCartMode = { vm.setCartMode(it) },
+            onRcmMode = { vm.setRcmMode(it) },
         )
         WarnCard(lastWarn)
 
@@ -166,7 +171,14 @@ private fun StatusCard(link: ArmLinkState, state: com.robotx.app.arm.model.ArmSt
             text = buildString {
                 append("模式 ${state.mode}")
                 append(" · ").append(if (state.enabled) "已使能" else "未使能")
-                append(" · ").append(if (state.cartMode) "方向控制中" else "方向控制关")
+                append(" · ").append(
+                    when {
+                        state.rcmMode -> "定点旋转中"
+                        state.cartEntering -> "方向控制进入中"
+                        state.cartMode -> "方向控制中"
+                        else -> "方向控制关"
+                    }
+                )
                 append(" · ").append(if (state.connected) "机械臂已连接" else "机械臂未连接")
             },
             style = MaterialTheme.typography.bodySmall,
@@ -182,30 +194,119 @@ private fun StatusCard(link: ArmLinkState, state: com.robotx.app.arm.model.ArmSt
     }
 }
 
-/** 方向控制开关 + 速度档：这两项决定方向盘能不能推、推多快。 */
+/**
+ * 方向控制开关 + 定点旋转（RCM）开关 + 速度档：这些决定轮盘推了往哪走、走多快。
+ *
+ * ## 模式显示与切换过渡态（2026-10-11）
+ * 模式显示**完全以服务端快照 `cart_mode` / `rcm_mode` 为准**，点击只发
+ * `set_cart_mode` / `set_rcm_mode`、绝不本地翻转 —— 真机进门要先限速回软件零位
+ * （可达数秒），期间服务端各次快照的 `cart_mode=false` 是正常过程；若本地乐观翻转，
+ * 这段快照会把 UI 顶回「方向控制关」，用户就得再点一次。
+ *
+ * 过渡态分两层：
+ *  - [cartEntering]（服务端 `cart_entering`）：进门期间为 true —— 显示「回零中…」，
+ *    到位后快照 `cart_mode=true` 自然翻到「方向控制中」；被拒/异常时服务端 finally
+ *    清除并广播，UI 回到原状态、原因落在「最近告警」。
+ *  - [pending]（本地）：从点击到快照亮出 `cart_entering`/模式变化之间的短暂过渡，
+ *    显示「切换中…」。清零时机：快照亮出 `cart_entering`（服务端已接管）/ 模式对
+ *    `(cartMode, rcmMode)` 相对点击时已变化（切换完成，含互斥自动顶掉另一半）/ 2s
+ *    超时兜底。期间禁用开关防重复点击（重复的 `on=true` 会让服务端把回零从头再走）。
+ *
+ * ## 定点旋转（RCM，v1.2.0）
+ * 与方向控制**互斥**：服务端进一个自动退另一个，所以开 RCM 后快照的 cartMode 会
+ * 自动翻 false（反之亦然）—— 两个开关的回显都跟快照走，不需要本地编排互斥。
+ */
 @Composable
 private fun DirectionCard(
     link: ArmLinkState,
     cartMode: Boolean,
+    cartEntering: Boolean,
+    rcmMode: Boolean,
     enabled: Boolean,
     factor: Double,
     onFactor: (Double) -> Unit,
     onCartMode: (Boolean) -> Unit,
+    onRcmMode: (Boolean) -> Unit,
 ) {
     val linkOnline = link == ArmLinkState.ONLINE
 
-    ToolCard("方向控制") {
+    // 本地过渡态：modeAtClick 记下点击时的模式对，快照里任一模式变了才算「切换完成」——
+    // 回零期间持续到来的 cart_mode=false 帧与点击时相同，不会误清 pending；
+    // RCM 互斥顶掉另一模式时模式对变化，pending 也会被正确清零。
+    var pending by remember { mutableStateOf(false) }
+    var modeAtClick by remember { mutableStateOf(cartMode to rcmMode) }
+    LaunchedEffect(cartMode, rcmMode, cartEntering) {
+        if (cartEntering || (cartMode to rcmMode) != modeAtClick) pending = false
+    }
+    LaunchedEffect(pending) {
+        if (pending) {
+            delay(2_000)   // 兜底：服务端拒绝/丢帧时恢复开关可用（原因看「最近告警」）
+            pending = false
+        }
+    }
+    val switching = pending || cartEntering
+
+    ToolCard("方向控制 / 定点旋转") {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("开启方向控制", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                text = when {
+                    cartEntering -> "回零中…"
+                    pending -> "切换中…"
+                    else -> "方向控制（前后左右）"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+            )
             Switch(
                 checked = cartMode,
-                onCheckedChange = onCartMode,
-                enabled = linkOnline && enabled,
+                onCheckedChange = { on ->
+                    modeAtClick = cartMode to rcmMode
+                    pending = true
+                    onCartMode(on)
+                },
+                enabled = linkOnline && enabled && !switching,
             )
         }
+        if (cartEntering) {
+            Text(
+                text = "正在进入方向控制：先回软件零位（可能需要几秒），到位后自动接管。",
+                style = MaterialTheme.typography.bodySmall,
+                color = HudAmber,
+            )
+        }
+
+        Spacer(Modifier.height(2.dp))
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = when {
+                    pending -> "切换中…"
+                    rcmMode -> "定点旋转中（轮盘 = 姿态旋转）"
+                    else -> "定点旋转（RCM）"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Switch(
+                checked = rcmMode,
+                onCheckedChange = { on ->
+                    modeAtClick = cartMode to rcmMode
+                    pending = true
+                    onRcmMode(on)
+                },
+                enabled = linkOnline && enabled && !switching,
+            )
+        }
+        Text(
+            text = "定点旋转：末端姿态绕进入时刻的夹爪尖端旋转（该点在空间中不动），" +
+                "与方向控制互斥 —— 开一个会自动关另一个。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
         if (!linkOnline) {
             Text(
                 text = "未连接服务端，无法开启。",
@@ -214,7 +315,7 @@ private fun DirectionCard(
             )
         } else if (!enabled) {
             Text(
-                text = "先使能机械臂，才能开启方向控制。",
+                text = "先使能机械臂，才能开启方向控制 / 定点旋转。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

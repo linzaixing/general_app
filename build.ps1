@@ -21,7 +21,7 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectRoot
 
-$env:JAVA_HOME = "F:\vibe_coding\.tools\jdk17"
+$env:JAVA_HOME = "D:\Program Files\Android\Android Studio\jbr"
 $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 $env:ANDROID_SDK_ROOT = $env:ANDROID_HOME
 $env:Path = "$env:JAVA_HOME\bin;$env:ANDROID_HOME\platform-tools;" + $env:Path
@@ -53,6 +53,16 @@ if (-not (Test-Path $apk)) { throw "APK not found at $apk" }
 $size = "{0:N2} MB" -f ((Get-Item $apk).Length / 1MB)
 Write-Host ""
 Write-Host "BUILD OK -> $apk ($size)"
+
+# 产物归档到 dist\：统一命名 deeparm_console_v<版本>.apk。
+# v1.1.0 起应用显示名从「机械臂小助手」改为 deeparm_console，APK 命名同步更名并保持一致。
+# ⚠️ 与 app/build.gradle.kts 的 versionName 同步改（v1.2.1：URDF 四零件支架网格 + 轴向居中）。
+$version = "1.2.1"
+$distDir = Join-Path $projectRoot "dist"
+New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+$distApk = Join-Path $distDir "deeparm_console_v$version.apk"
+Copy-Item $apk $distApk -Force
+Write-Host "DIST OK  -> $distApk"
 
 if ($Install) {
     & "$env:ANDROID_HOME\platform-tools\adb.exe" install -r $apk

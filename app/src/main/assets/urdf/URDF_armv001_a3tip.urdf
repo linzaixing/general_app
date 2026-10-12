@@ -50,6 +50,40 @@
   · URDF 惯量是厂商标称理论值 + 合并近似，最终必须用 `arm_control.gravity` 的
     静态辨识（StaticGravityIdentifier）以实机力矩反馈重新标定。
 
+  改了什么（2026-10-11 第三次修正：ID2→ID3 机体换真实 arm_v002b）
+  ──────────────────────────────────────────────────────────────
+  来源：f:\Robot\岳强机械臂装配体1.STEP（STEPCAFControl 组件树解析，cad env）。
+  旧 URDF 把 ID2→ID3 之间的机体理想化了，与真实装配不符；现按真实支架修正：
+
+  · 几何实测（arm_v002b 局部系，两关节孔均沿局部 Z、孔簇与全局轴线重合 ≤0.002mm）：
+      - ID2 孔轴过局部 (−280,−35)、ID3 孔轴过局部 (0,0)；
+      - ID2→ID3 垂距 D = 282.179 mm（旧 URDF 306.71 mm，差 −24.5 mm）；
+      - 折叠位（q2=+1.491, q3=−1.084，其余 0）实测 TCP z≈0.135~0.142，
+        拟合得 ID2→ID3 向量仰角 α = 30.0°（旧 32.76°）——设计圆整值与实测互证。
+  · `third_joint` origin：xyz 由 (0, 0.165990, 0.257914) 改为
+    (0, 0.141086, 0.244377)；rpy=0、axis=(−1,0,0) **保持不变**（两孔轴平行，
+    与原 axis 一致）。
+  · `second_Link` visual/collision 换为真实支架网格 `arm_v002b.stl`
+    （12647 面，单位 m，v002b 局部坐标系）；visual origin 把 ID2 孔轴对到
+    link 转轴（x 轴）、ID3 孔对到 third_joint 原点。
+  · **惯性未动**：mass/CoM 仍为旧值 0.966 kg——真实件为 v002+v002b 对板
+    （合计 258 cm³），材质未确认，留待 α 重辨识吸收/复核。
+  · 关节链拓扑、其余关节、tool_tcp 保持不变。
+
+  改了什么（2026-10-11 第三次修正补充：second_Link 换四零件整体网格）
+  ──────────────────────────────────────────────────────────────
+  用户更正：ID2→ID3 之间的第二关节臂由 4 个零件组成一个整体
+  （① 一轴轴承盖 ② arm_v002b ③ arm_v002 ④ 二轴螺钉盖2），
+  之前只导出 arm_v002b 单件做 mesh 是错的。已按 BOM 从 STEP 重新导出
+  `second_arm_asm.stl`（四件统一到 v002b 局部系合成 compound，41047 面、
+  米制）；装配态复测 D = 282.1790mm 与单件一致 → third_joint origin 与
+  second_Link visual origin 的 xyz/rpy 全部不变，仅 mesh 文件名更换。
+  详见 second_Link 处注释。
+
+  ⚠️ 后果（必做后续）：① 重力 α 必须再次重辨识（sign_identify 的 record 与
+  solve 两步，只取 scale）；② m0 锚点需用折叠位 FK 复核；③ 软限位表如需调整单独立项。
+  ============================================================================
+
   本文件只需惯性信息即可被 Pinocchio 加载；visual/collision 仅为可读性保留。
   ============================================================================
 -->
@@ -77,7 +111,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://URDF_armv001/meshes/base_link.STL" />
+          filename="meshes/base_link.STL" />
       </geometry>
       <material
         name="">
@@ -91,7 +125,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://URDF_armv001/meshes/base_link.STL" />
+          filename="meshes/base_link.STL" />
       </geometry>
     </collision>
   </link>
@@ -117,7 +151,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://URDF_armv001/meshes/first_Link.STL" />
+          filename="meshes/first_Link.STL" />
       </geometry>
       <material
         name="">
@@ -131,7 +165,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://URDF_armv001/meshes/first_Link.STL" />
+          filename="meshes/first_Link.STL" />
       </geometry>
     </collision>
   </link>
@@ -156,6 +190,9 @@
   <link
     name="second_Link">
     <inertial>
+      <!-- 2026-10-11：惯性保留旧值（0.966 kg，旧支架标称）；真实件为
+           arm_v002+v002b 对板（合计 258 cm³），材质未确认——质量/CoM 的修正
+           由重力 α 重辨识（StaticGravityIdentifier）吸收，勿在此手工乱改。 -->
       <origin
         xyz="0.000857573444558835 0.0776042459103315 0.130616624503666"
         rpy="0 0 0" />
@@ -169,13 +206,40 @@
         iyz="-0.00107551298210178"
         izz="0.0010159642390867" />
     </inertial>
+    <!-- 2026-10-11：几何换真实支架四零件整体 second_arm_asm（STEP 实测）。
+         来源：f:\Robot\岳强机械臂装配体1.STEP，ID2→ID3 之间的第二关节臂由
+         4 个零件组成一个整体（PRODUCT 名自 STEP 解码验证）：
+           ① 一轴轴承盖（NAUO26，贴合 v002b 板底面、ID2 轴负向侧）
+           ② arm_v002b（NAUO6，基准板：ID3 孔轴过局部 (0,0)、ID2 过 (−280,−35)）
+           ③ arm_v002（NAUO5，与 v002b 对扣的上板）
+           ④ 二轴螺钉盖2（NAUO28，孔与 ID2 轴同轴 ≤0.0001mm，轴向 +58mm 处）
+         四件统一到 v002b 局部系后合成 compound 导出（41047 三角形、米制）；
+         装配态复测 ID2/ID3 孔轴垂距 D = 282.1790mm（与单件 v002b 一致，
+         偏差 +0.0000mm）。
+         visual origin 的作用：把 v002b 局部系的 ID2 孔轴（过局部 (−280,−35)、
+         沿局部 Z）对到本 link 的转轴（x 轴），同时把 ID3 孔轴（过局部 (0,0)）
+         对到 third_joint 原点——因此 xyz 的 yz 分量恰等于 third_joint origin
+         的 (y3,z3)，rpy 为孔轴→x 轴 + 折叠位拟合仰角 30° 的合成旋转。
+         换四件整体网格后按同法数值复算：rpy=(1.570796, −0.922858, 1.570796)、
+         ID3→(0, 0.141086, 0.244377)，径向标定不变。
+         2026-10-12 轴向修正（方案 A，用户确认）：v002b 零件原点的 local z=0
+         无物理意义，孔相对 URDF 转轴整体沿轴向偏了约 +20mm，查看器里两头
+         电机与夹板之间出现间隙。CAD 实测（四件装配态，v002b 局部系）：
+         主电机巢中点 ID2=+19.55（r56.95 壁 z −13.25~+52.36）、ID3=+18.5；
+         真实电机本体中点 RS03=+19.7、RS02=+21.3（RS02 顶肩定位、设计上
+         本就不在孔跨中点）；原 URDF 的三明治网格（second_Link.STL ±35、
+         first_Link/third_Link 电机 ±29~±30）均关于关节原点对称，即原约定
+         是「电机三明治中心 = 关节原点」。取 s = −0.020（xyz 的 x 分量）：
+         RS03 偏 −0.3mm、RS02 偏 +1.3mm、ID2 主巢偏 −0.45mm，两站全部
+         ≤1.3mm 居中，复现原约定。注意两孔全跨度中点不相等（ID2 +20.5 /
+         ID3 +17.0，被底部工艺孔与顶部沉孔拉偏），不能按单一孔跨中点取值。 -->
     <visual>
       <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+        xyz="-0.020 0.141086 0.244377"
+        rpy="1.570796 -0.922858 1.570796" />
       <geometry>
         <mesh
-          filename="package://URDF_armv001/meshes/second_Link.STL" />
+          filename="meshes/second_arm_asm.stl" />
       </geometry>
       <material
         name="">
@@ -185,11 +249,11 @@
     </visual>
     <collision>
       <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+        xyz="-0.020 0.141086 0.244377"
+        rpy="1.570796 -0.922858 1.570796" />
       <geometry>
         <mesh
-          filename="package://URDF_armv001/meshes/second_Link.STL" />
+          filename="meshes/second_arm_asm.stl" />
       </geometry>
     </collision>
   </link>
@@ -233,7 +297,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://URDF_armv001/meshes/third_Link.STL" />
+          filename="meshes/third_Link.STL" />
       </geometry>
       <material
         name="">
@@ -247,15 +311,20 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://URDF_armv001/meshes/third_Link.STL" />
+          filename="meshes/third_Link.STL" />
       </geometry>
     </collision>
   </link>
   <joint
     name="third_joint"
     type="revolute">
+    <!-- 2026-10-11：origin 按真实支架 arm_v002b 修正。
+         旧值 (0, 0.165989898732231, 0.257913780286487)（D=306.71mm, α=32.76°）
+         → 新值 (0, 0.141086, 0.244377)（D=282.179mm CAD 实测，
+         α=30.0° 由折叠位 q2=+1.491/q3=−1.084 实测 z≈0.135~0.142 拟合）。
+         axis 保持 (−1,0,0)：CAD 两孔轴平行、与 ID2 轴同向，无需改。 -->
     <origin
-      xyz="0 0.165989898732231 0.257913780286487"
+      xyz="0 0.141086 0.244377"
       rpy="0 0 0" />
     <parent
       link="second_Link" />
@@ -291,7 +360,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://URDF_armv001/meshes/fourth_Link.STL" />
+          filename="meshes/fourth_Link.STL" />
       </geometry>
       <material
         name="">
@@ -305,7 +374,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://URDF_armv001/meshes/fourth_Link.STL" />
+          filename="meshes/fourth_Link.STL" />
       </geometry>
     </collision>
   </link>
@@ -356,7 +425,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://URDF_armv001/meshes/fifth_Link.STL" />
+          filename="meshes/fifth_Link.STL" />
       </geometry>
       <material
         name="">
@@ -370,7 +439,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://URDF_armv001/meshes/fifth_Link.STL" />
+          filename="meshes/fifth_Link.STL" />
       </geometry>
     </collision>
     <!-- 夹爪（原厂 jaw.stl。在 el_a3.urdf 里它与 el05_l6.stl 同挂 l5_l6_urdf_asm、
@@ -384,7 +453,7 @@
         rpy="1.5708 0 0" />
       <geometry>
         <mesh
-          filename="package://el_a3_description/meshes/jaw.stl" />
+          filename="meshes/jaw.stl" />
       </geometry>
       <material
         name="orange">
@@ -398,7 +467,7 @@
         rpy="1.5708 0 0" />
       <geometry>
         <mesh
-          filename="package://el_a3_description/meshes/jaw.stl" />
+          filename="meshes/jaw.stl" />
       </geometry>
     </collision>
   </link>

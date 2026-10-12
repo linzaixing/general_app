@@ -13,8 +13,8 @@ android {
         applicationId = "com.robotx.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 20
-        versionName = "1.0.15"
+        versionCode = 26
+        versionName = "1.2.1"
 
         vectorDrawables.useSupportLibrary = true
     }

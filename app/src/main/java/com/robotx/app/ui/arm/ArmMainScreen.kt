@@ -6,6 +6,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -33,10 +35,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,11 +65,15 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.robotx.app.arm.ArmViewModel
 import com.robotx.app.arm.JoyJogEffect
 import com.robotx.app.arm.model.ArmLinkState
+import com.robotx.app.arm.model.GraspNotice
 import com.robotx.app.ui.SettingsDialog
 import com.robotx.app.ui.theme.EnableGreen
+import com.robotx.app.ui.theme.EstopDarkRed
 import com.robotx.app.ui.theme.HudAmber
 import com.robotx.app.ui.theme.hudBackdrop
 import com.robotx.app.ui.theme.hudFrame
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
 /**
  * 控制台（横屏）：左边一窗两画面（相机 / 仿真），右边方向操作。
@@ -90,6 +98,7 @@ fun ArmMainScreen(
     val state by vm.state.collectAsState()
     val logs by vm.logs.collectAsState()
     val tempPopup by vm.tempPopup.collectAsState()
+    val graspResult by vm.graspResult.collectAsState()
     val cfg by vm.config.collectAsState()
 
     var axis by remember { mutableStateOf(0.0 to 0.0) }
@@ -107,22 +116,64 @@ fun ArmMainScreen(
     val previewOffline = preview && !linkOnline
     // 方向控制要三件事同时成立：通道在线、已使能、服务端处于笛卡尔模式。
     val jogEnabled = linkOnline && state.enabled && state.cartMode
+    // 定点旋转（RCM，v1.2.0）同样要三件事：在线、已使能、服务端处于 rcm 模式。
+    // 与方向控制互斥（服务端进一个自动退另一个），任一时刻至多一个为真。
+    val rcmEnabled = linkOnline && state.enabled && state.rcmMode
     val endpoint = remember(cfg) { if (cfg.isConfigured) cfg.endpoint() else null }
 
-    // 轮盘与高度滑条共用同一个 20Hz 发送器：任意一个按住就开动。
+    // 轮盘与高度滑条共用同一个 30Hz 发送器（v1.1.0 从 20Hz 提频，理由见 JoyJogEffect）：
+    // 任意一个按住就开动。
     val jogging = padActive || sliderActive
 
+    // 30Hz 发送器按模式分流：cart 模式发 cart_jog（轮盘=前后左右、滑条=升降）；
+    // RCM 模式下服务端只认 rcm_jog —— 轮盘改作姿态源（X=roll、Y=pitch），
+    // 高度滑条无效（enabled 已置灰）。onFrame 经 JoyJogEffect 的
+    // rememberUpdatedState 每帧取最新，模式切换当帧即生效、无闭包过期问题。
     JoyJogEffect(
         active = jogging,
-        enabled = jogEnabled,
+        enabled = jogEnabled || rcmEnabled,
         axis = axis,
         lift = lift,
         factor = factor,
-        onFrame = { lx, ly, ry, dt, f -> vm.cartJog(lx, ly, ry, dt, f) },
+        onFrame = { lx, ly, ry, dt, f ->
+            if (state.rcmMode) {
+                vm.rcmJog(droll = lx, dpitch = -ly, dt = dt, factor = f)
+            } else {
+                vm.cartJog(lx, ly, ry, dt, f)
+            }
+        },
     )
+
+    // 使能成功后自动进入逆运动学（v1.0.17）：只跟「使能 false→true」的上升沿发一次
+    // set_cart_mode(true)，进门流程（含先回软件零位）完全交给服务端 —— 快照的
+    // cart_entering「回零中…」过渡态 UI 已支持。防重复：快照已显示 cart_mode=true
+    // 或正在进门（cart_entering=true）时不再发 —— 服务端对重复的 on=true 会把回零
+    // 从头再走；服务端拒绝（门禁不满足）时也不重试，原因看「最近告警」。
+    // 失能后复位标志，下次使能重新触发一次。
+    var autoCartOnEnable by remember { mutableStateOf(false) }
+    LaunchedEffect(state.enabled) {
+        if (state.enabled) {
+            if (!autoCartOnEnable && !state.cartMode && !state.cartEntering) {
+                autoCartOnEnable = true
+                vm.setCartMode(true)
+            }
+        } else {
+            autoCartOnEnable = false
+        }
+    }
 
     // 「推不动」的唯一反馈渠道：服务端门禁拒绝时只写日志、不回包。
     val lastWarn = logs.lastOrNull { it.level == "warn" || it.level == "warning" || it.level == "error" }
+
+    // 抓取结果（服务端 grasp_result 事件）在状态行短暂显示 5s 后自动消失；
+    // 声音播报由 ArmRepository.onGraspResult 统一走 TTS，这里只负责「看得见」。
+    var graspHint by remember { mutableStateOf<GraspNotice?>(null) }
+    LaunchedEffect(graspResult) {
+        val n = graspResult ?: return@LaunchedEffect
+        graspHint = n
+        delay(5_000)
+        graspHint = null
+    }
 
     Box(modifier = Modifier.fillMaxSize().hudBackdrop()) {
         Row(
@@ -147,8 +198,12 @@ fun ArmMainScreen(
                 linkOnline = linkOnline,
                 offlinePreview = previewOffline,
                 enabled = state.enabled,
+                loopHz = state.loopHz,
+                cartEntering = state.cartEntering,
                 jogEnabled = jogEnabled,
+                rcmEnabled = rcmEnabled,
                 gripperEnabled = linkOnline && state.enabled,
+                graspHint = graspHint,
                 onPadActive = { padActive = it },
                 onPadAxis = { lx, ly -> axis = lx to ly },
                 onSliderActive = { sliderActive = it },
@@ -245,7 +300,12 @@ fun ArmMainScreen(
  * 夹爪键同理摆在右上角（见 [GripperKey]）：按住张开、松手合爪。
  *
  * @param jogEnabled     未使能 / 未连 / 非笛卡尔模式时为 false，轮盘与滑条整体置灰。
+ * @param rcmEnabled     定点旋转（RCM）模式生效中（v1.2.0）：轮盘改作姿态源
+ *                       （X=roll / Y=pitch）、高度滑条置灰，状态行给 RCM 提示。
+ * @param cartEntering   服务端正在进方向控制（回软件零位中）：状态行给出过渡提示，
+ *                       避免「回零期间快照 cart_mode=false」被误读成「没点上」。
  * @param gripperEnabled 未连 / 未使能时为 false：夹爪键置灰不响应（夹爪不依赖笛卡尔模式）。
+ * @param graspHint      夹爪闭合抓取检测结果（5s 后由调用方清空）：状态行下方短暂显示。
  * @param offlinePreview 离线预览：按钮保持可点（点了弹提示），控件区盖一层拦截层。
  * @param onVoice        语音输入：打开录音识别弹窗（见 [VoiceDialog]）。
  * @param onNeedNetwork  离线预览时点到控制类操作的回调（弹「先去联网」提示）。
@@ -255,8 +315,12 @@ private fun ControlDeck(
     linkOnline: Boolean,
     offlinePreview: Boolean,
     enabled: Boolean,
+    loopHz: Double?,
+    cartEntering: Boolean,
     jogEnabled: Boolean,
+    rcmEnabled: Boolean,
     gripperEnabled: Boolean,
+    graspHint: GraspNotice?,
     onPadActive: (Boolean) -> Unit,
     onPadAxis: (lx: Double, ly: Double) -> Unit,
     onSliderActive: (Boolean) -> Unit,
@@ -315,6 +379,11 @@ private fun ControlDeck(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
+                // 控制循环实时帧率徽标（v1.1.0）：摆在使能键左边，1s 刷一次。
+                LoopHzBadge(
+                    online = linkOnline,
+                    loopHz = loopHz,
+                )
                 // 使能与失能：绿 / 灰的电感图标，一眼能分出「现在是哪种状态可以点」。
                 DeckIconButton(
                     onClick = onEnable,
@@ -357,11 +426,16 @@ private fun ControlDeck(
                     offlinePreview -> "离线预览 · 操作机械臂请先回首页连接服务端"
                     !linkOnline -> "未连接服务端 · 方向控制不可用"
                     !enabled -> "未使能 · 先点使能，再到工具栏开「方向控制」"
+                    // 服务端正在进方向控制（先限速回软件零位，可达数秒）：期间
+                    // 快照 cart_mode=false 是正常过程，别让用户误以为「没点上」。
+                    cartEntering -> "正在进入方向控制：回软件零位中，请稍候…"
+                    // RCM 生效中：轮盘语义换成姿态旋转（服务端只认 rcm_jog）
+                    rcmEnabled -> "定点旋转中 · 轮盘 = 姿态旋转（X 自转 / Y 俯仰）· 点右上角开 / 合夹爪"
                     !jogEnabled -> "方向控制已关闭 · 到工具栏打开「方向控制」"
                     else -> "按住轮盘走前后左右 · 拖右侧刻度升 / 降 · 点右上角开 / 合夹爪"
                 },
                 // 「不能动」的原因用琥珀标出来，正常提示走灰 —— 一行字也要能一眼分出好坏。
-                color = if (jogEnabled) MaterialTheme.colorScheme.onSurfaceVariant else HudAmber,
+                color = if (jogEnabled || rcmEnabled) MaterialTheme.colorScheme.onSurfaceVariant else HudAmber,
                 fontFamily = FontFamily.Monospace,
                 textAlign = TextAlign.Center,
                 fontSize = 9.sp,
@@ -369,6 +443,28 @@ private fun ControlDeck(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.fillMaxWidth(),
             )
+
+            // 抓取结果提示行（服务端 grasp_result 事件，5s 后自动消失）：
+            // 夹到=绿色 / 未夹到或未知=琥珀 —— 与状态行的「好/坏」配色约定一致。
+            graspHint?.let { n ->
+                Text(
+                    text = n.text,
+                    color = if (n.grasped == true) EnableGreen else HudAmber,
+                    fontFamily = FontFamily.Monospace,
+                    textAlign = TextAlign.Center,
+                    fontSize = 9.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            color = if (n.grasped == true) EnableGreen.copy(alpha = 0.12f)
+                            else HudAmber.copy(alpha = 0.12f),
+                            shape = MaterialTheme.shapes.small,
+                        )
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
 
             if (offlinePreview) {
                 Text(
@@ -398,9 +494,7 @@ private fun ControlDeck(
                     // 背景圆 / 十字参考线的圆心因此永远落在可用区域的几何中心，
                     // 左右留白对称（旧实现直接 fillMaxSize，宽屏下圆心虽居中，
                     // 但角键与圆的相对位置随屏宽漂移，看起来像「中心有偏移」）。
-                    // 左上角语音键、右上角夹爪键锚在正方形自己的两个上角，
-                    // 与圆缘保持固定间距，不再被多余的水平留白推开。
-                    Box(
+                    BoxWithConstraints(
                         modifier = Modifier.weight(1f).fillMaxHeight(),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -410,25 +504,42 @@ private fun ControlDeck(
                                 .aspectRatio(1f),
                         ) {
                             JoyPad(
-                                enabled = jogEnabled,
+                                // RCM 模式下轮盘仍在用：轴值改作姿态源（X=roll / Y=pitch），
+                                // 由调用方的 30Hz 发送器分流成 rcm_jog
+                                enabled = jogEnabled || rcmEnabled,
                                 onActiveChange = onPadActive,
                                 onAxisChange = onPadAxis,
                                 modifier = Modifier.fillMaxSize(),
                             )
-                            VoiceKey(
-                                onClick = onVoice,
-                                enabled = canVoice,
-                                modifier = Modifier.align(Alignment.TopStart).padding(2.dp),
-                            )
-                            GripperKey(
-                                onOpen = onGripperOpen,
-                                onClose = onGripperClose,
-                                enabled = gripperEnabled,
-                                modifier = Modifier.align(Alignment.TopEnd).padding(2.dp),
-                            )
                         }
+                        // 左上角语音键、右上角夹爪键（v1.0.17）：仍以轮盘正方形的两个
+                        // 上角为基准（v1.0.12~v1.0.16 的锚点），但各向**外挪「单侧留白的
+                        // 一半」**。正方形与可用区等高且水平居中，单侧留白 =
+                        // (可用宽 − 正方形边) / 2，这里用 [offset] 把两键各平移一半：
+                        // 语音键左移一半、夹爪键右移一半 —— 两者间隔拉开一整个留白，
+                        // 又只走到留白中点，贴不到面板外框，仍看得出「属于轮盘」。
+                        // 窄屏（可用区不宽于正方形）下留白为 0，自动退回原角位。
+                        val sideMargin = (maxWidth - maxHeight).coerceAtLeast(0.dp) / 2
+                        VoiceKey(
+                            onClick = onVoice,
+                            enabled = canVoice,
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(2.dp)
+                                .offset(x = sideMargin / 2),
+                        )
+                        GripperKey(
+                            onOpen = onGripperOpen,
+                            onClose = onGripperClose,
+                            enabled = gripperEnabled,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(2.dp)
+                                .offset(x = -sideMargin / 2),
+                        )
                     }
                     HeightSlider(
+                        // RCM 模式下高度无效（服务端只认 rcm_jog，没有升降语义）→ 置灰
                         enabled = jogEnabled,
                         onActiveChange = onSliderActive,
                         onValueChange = onLift,
@@ -449,13 +560,53 @@ private fun ControlDeck(
 }
 
 /**
- * 急停按钮：正规 stop sign 样式 —— **红色圆底 + 白色八角形 + 中间红字 STOP**，
- * 全部用 Canvas 自绘，不引图片资源。
+ * 控制循环实时帧率徽标（v1.1.0）：显示服务端快照 `loop_hz`（200Hz 控制环，
+ * 服务端每秒刷新一次该字段）。
+ *
+ * 刷新节奏刻意与快照解耦：快照按服务端自己的高频节奏推送，这里本地 1s 定时取
+ * 「最近一次快照值」刷 UI —— 读数每秒更新一次，徽标不跟着每帧快照重绘。
+ * 未连接 / 快照里还没有 `loop_hz` 时显示 "--"。
+ * 样式与顶部图标行一致：淡设备面圆角小底 + 等宽小字（状态行同款 Monospace），
+ * 有读数时用 [EnableGreen] 与使能图标呼应，无数据退回次要灰。
+ */
+@Composable
+private fun LoopHzBadge(
+    online: Boolean,
+    loopHz: Double?,
+    modifier: Modifier = Modifier,
+) {
+    var display by remember { mutableStateOf<Double?>(null) }
+    // loopHz 走 rememberUpdatedState：定时器只启动一次，读的永远是最新快照值。
+    val latest = rememberUpdatedState(loopHz)
+    LaunchedEffect(Unit) {
+        while (isActive) {
+            display = latest.value
+            delay(1_000)
+        }
+    }
+    val value = if (online) display else null
+    Text(
+        text = value?.let { "%.1f Hz".format(it) } ?: "--",
+        fontFamily = FontFamily.Monospace,
+        fontSize = 9.sp,
+        color = if (value != null) EnableGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+        modifier = modifier
+            .clip(MaterialTheme.shapes.small)
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
+            .padding(horizontal = 5.dp, vertical = 3.dp),
+    )
+}
+
+/**
+ * 急停按钮：正规 stop sign 样式 —— **深红圆底 + 同色深红八角形 + 白色 STOP 字**
+ * （v1.0.17 配色：圆底与八角**同色**、中间不再留任何白色区域，只有字是白的；
+ * 八角的形状与尺寸保持不变）。全部用 Canvas 自绘，不引图片资源。
  *
  * 为什么不复用 [DeckIconButton] + `Icons.Filled.Stop`：那个图标是「实心圆里一个方停」，
  * 与「失能」的电感图标在小尺寸下几乎分不出来。八角 STOP 是公路标志的通用语汇，
  * 操作者在慌乱中扫一眼也能认出「这是立即停车」，不能长得像普通功能键。
- * 置灰态整体降饱和（红→轮廓色），但仍保持八角结构，可辨识度不丢。
+ * 置灰态整体降饱和（深红→轮廓色、白字→面板色），但仍保持八角结构，可辨识度不丢。
  */
 @Composable
 private fun EstopButton(
@@ -463,11 +614,12 @@ private fun EstopButton(
     enabled: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val red = if (enabled) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline
-    val octagon = if (enabled) Color.White else MaterialTheme.colorScheme.surface
+    // 圆底与八角同一块深红：八角只负责形状语义，视觉上是一枚深红圆牌 + 白字。
+    val face = if (enabled) EstopDarkRed else MaterialTheme.colorScheme.outline
+    val ink = if (enabled) Color.White else MaterialTheme.colorScheme.surface
     val stopPaint = remember(enabled) {
         android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-            color = red.toArgb()
+            color = ink.toArgb()
             textAlign = android.graphics.Paint.Align.CENTER
             isFakeBoldText = true
         }
@@ -482,16 +634,17 @@ private fun EstopButton(
         Canvas(modifier = Modifier.fillMaxSize()) {
             val c = Offset(size.width / 2f, size.height / 2f)
             val r = size.minDimension / 2f
-            // ① 红色圆底。
-            drawCircle(color = red, radius = r, center = c)
-            // ② 圆底内缘一圈细白环：给八角留出「镶边」，更像标志牌。
+            // ① 深红圆底。
+            drawCircle(color = face, radius = r, center = c)
+            // ② 圆底内缘一圈细暗环：同色系里给一点「镶边」层次（不再是白环）。
             drawCircle(
-                color = octagon.copy(alpha = 0.8f),
+                color = Color.Black.copy(alpha = 0.25f),
                 radius = r * 0.92f,
                 center = c,
                 style = Stroke(1.5f),
             )
-            // ③ 白色八角形（正八边形，顶点从 22.5° 起保证上下边水平）。
+            // ③ 深红八角形（正八边形，顶点从 22.5° 起保证上下边水平）——与圆底同色，
+            //    中间不留白色区域；形状与尺寸不变，白色只剩 STOP 字。
             val path = Path()
             for (k in 0 until 8) {
                 val ang = Math.PI / 8 + k * Math.PI / 4
@@ -500,9 +653,13 @@ private fun EstopButton(
                 if (k == 0) path.moveTo(px, py) else path.lineTo(px, py)
             }
             path.close()
-            drawPath(path, octagon)
-            // ④ 八角中央的 STOP 红字（Compose 无原生 drawText，借 nativeCanvas）。
-            stopPaint.textSize = r * 0.34f
+            drawPath(path, face)
+            // ④ 八角中央的白色 STOP 字（Compose 无原生 drawText，借 nativeCanvas）。
+            // v1.1.0：字号 0.34r → 0.42r（+23.5%），急停字样更醒目。放大量经几何核算：
+            // 44dp 圆内 r=22dp，八角内切半宽 ≈ 0.924×0.72r ≈ 14.6dp，而 0.42r≈9.2dp
+            // 的加粗 "STOP" 半宽 ≈ 12dp、字高半高 ≈ 3.3dp —— 横竖都留有余量，
+            // 不溢出八角、不碰圆边。
+            stopPaint.textSize = r * 0.42f
             drawIntoCanvas { canvas ->
                 val fm = stopPaint.fontMetrics
                 val baseline = c.y - (fm.ascent + fm.descent) / 2f
