@@ -246,7 +246,6 @@ fun axisOfDelta(start: P3, end: P3): Triple<Int, Float, Float> {
     }
 }
 
-fun snapCut(value: Float, size: Int): Int? {
-    val k = value.roundToInt()
-    return if (k in 1 until size) k else null
-}
+/** 切割线吸附到最近的格线；拖出木料范围时贴到边缘。 */
+fun snapCut(value: Float, size: Int): Int =
+    value.roundToInt().coerceIn(1, size - 1)
