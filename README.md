@@ -22,8 +22,8 @@
 ## 分支开发流程
 
 ```bash
-git clone git@github.com:linzaixing/robot_x.git
-cd robot_x
+git clone git@github.com:linzaixing/general_app.git
+cd general_app
 git switch feature/<name>     # 切换到目标应用分支
 
 # 开发完成后
