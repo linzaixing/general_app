@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.smartmood.app"
+    namespace = "com.generalapp.joinery"
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.smartmood.app"
+        applicationId = "com.generalapp.joinery"
         minSdk = 29
         targetSdk = 36
         versionCode = 1
@@ -50,7 +50,6 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("androidx.core:core-ktx:1.19.1")
-    implementation("io.github.sceneview:arsceneview:4.60.0")
 
     testImplementation("junit:junit:4.13.2")
 }
