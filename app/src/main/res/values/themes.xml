@@ -1,0 +1,8 @@
+<resources>
+    <style name="Theme.SmartMood" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#FFFBF6F0</item>
+        <item name="android:statusBarColor">#FFFBF6F0</item>
+        <item name="android:navigationBarColor">#FFFBF6F0</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>
