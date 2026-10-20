@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "SmartMood"
+rootProject.name = "general_app"
 include(":app")
