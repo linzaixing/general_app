@@ -153,7 +153,7 @@ fun PuzzleScreen(vm: GameViewModel, level: Level, onExit: () -> Unit) {
                                         val (axis, delta, endCoord) = axisOfDelta(hit.world, endWorld)
                                         if (abs(delta) >= 0.6f) {
                                             val k = snapCut(endCoord + n / 2f, n)
-                                            if (k != null) vm.cut(axis, k, delta > 0)
+                                            vm.cut(axis, k, delta > 0)
                                         }
                                     }
                                 }
