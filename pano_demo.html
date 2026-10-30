@@ -1,0 +1,177 @@
+
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Air 全景查看器</title>
+<style>
+  html, body { margin:0; height:100%; background:#000; overflow:hidden;
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  canvas { position:fixed; inset:0; width:100%; height:100%; display:block;
+    touch-action:none; cursor:grab; }
+  canvas.dragging { cursor:grabbing; }
+  .bar { position:fixed; top:18px; left:50%; transform:translateX(-50%);
+    display:flex; gap:8px; padding:8px; border-radius:999px;
+    background:rgba(0,0,0,.55); backdrop-filter:blur(8px); z-index:2; }
+  .bar button { border:0; border-radius:999px; padding:10px 16px;
+    background:transparent; color:#eee; font-size:14px; cursor:pointer; }
+  .bar button.active { background:#fff; color:#111; }
+  .title { position:fixed; top:20px; left:20px; color:#fff; font-size:15px;
+    letter-spacing:.04em; z-index:2; opacity:.85; }
+  .hint { position:fixed; bottom:18px; left:50%; transform:translateX(-50%);
+    color:#bbb; font-size:13px; z-index:2; background:rgba(0,0,0,.45);
+    padding:8px 14px; border-radius:999px; white-space:nowrap; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="title">Air 全景查看器</div>
+<div class="bar">
+  <button data-mode="pano" class="active">360° 全景</button>
+  <button data-mode="planet">小行星</button>
+  <button data-mode="rabbit">兔子洞</button>
+  <button data-mode="fisheye">鱼眼</button>
+</div>
+<div class="hint">拖动旋转 · 滚轮缩放 · 双击复位</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
+const W = 640, H = 360;
+canvas.width = W; canvas.height = H;
+
+const state = {
+  mode: 'pano', yaw: Math.PI, pitch: 0, fov: 100, zoom: 1,
+  drag: false, lx: 0, ly: 0, dirty: true
+};
+
+let src = null, srcW = 0, srcH = 0;
+
+const img = new Image();
+img.onload = () => {
+  srcW = img.naturalWidth; srcH = img.naturalHeight;
+  const off = document.createElement('canvas');
+  off.width = srcW; off.height = srcH;
+  const octx = off.getContext('2d');
+  octx.drawImage(img, 0, 0);
+  src = octx.getImageData(0, 0, srcW, srcH).data;
+  requestAnimationFrame(tick);
+};
+img.src = 'equirect.jpg';
+
+function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+
+function sample(lon, lat, data, out, o) {
+  let x = (lon / (2 * Math.PI) + 0.5) * srcW;
+  x = x - Math.floor(x / srcW) * srcW;
+  let y = (0.5 - lat / Math.PI) * (srcH - 1);
+  y = clamp(y, 0, srcH - 1);
+  const xi = x | 0, yi = y | 0;
+  const j = (yi * srcW + xi) * 4;
+  out[o] = data[j]; out[o + 1] = data[j + 1]; out[o + 2] = data[j + 2]; out[o + 3] = 255;
+}
+
+function rotate(d, yaw, pitch) {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  let y = d[1] * cp - d[2] * sp;
+  let z = d[1] * sp + d[2] * cp;
+  let x = d[0] * cy + z * sy;
+  z = -d[0] * sy + z * cy;
+  return [x, y, z];
+}
+
+function render() {
+  if (!src) return;
+  const out = ctx.createImageData(W, H);
+  const data = out.data;
+  const isPlanet = state.mode === 'planet' || state.mode === 'rabbit';
+  const isFisheye = state.mode === 'fisheye';
+  const fovRad = state.fov * Math.PI / 360;
+  const tanF = Math.tan(fovRad);
+
+  for (let py = 0; py < H; py++) {
+    const v = (py - H / 2) / (H / 2);
+    for (let px = 0; px < W; px++) {
+      const u = (px - W / 2) / (W / 2);
+      let d;
+      if (isPlanet) {
+        const r = Math.hypot(u, v) * state.zoom;
+        const th = 2 * Math.atan(r);
+        const ph = Math.atan2(v, u);
+        const st = Math.sin(th), ct = Math.cos(th);
+        d = [st * Math.cos(ph), (state.mode === 'planet' ? -ct : ct), st * Math.sin(ph)];
+        d = rotate(d, state.yaw, 0);
+      } else if (isFisheye) {
+        const r = Math.hypot(u, v);
+        const th = r * fovRad;
+        const ph = Math.atan2(v, u);
+        const st = Math.sin(th);
+        d = [st * Math.cos(ph), st * Math.sin(ph), Math.cos(th)];
+        d = rotate(d, state.yaw, state.pitch);
+      } else {
+        d = [u * tanF, -v * tanF, 1];
+        d = rotate(d, state.yaw, state.pitch);
+      }
+      const n = Math.hypot(d[0], d[1], d[2]) || 1;
+      const lon = Math.atan2(d[0] / n, d[2] / n);
+      const lat = Math.asin(clamp(d[1] / n, -1, 1));
+      sample(lon, lat, src, data, (py * W + px) * 4);
+    }
+  }
+  ctx.putImageData(out, 0, 0);
+}
+
+function tick() {
+  if (state.dirty) {
+    state.dirty = false;
+    render();
+  }
+  requestAnimationFrame(tick);
+}
+
+canvas.addEventListener('pointerdown', e => {
+  state.drag = true; state.lx = e.clientX; state.ly = e.clientY;
+  canvas.classList.add('dragging');
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove', e => {
+  if (!state.drag) return;
+  const dx = (e.clientX - state.lx) / W;
+  const dy = (e.clientY - state.ly) / H;
+  state.lx = e.clientX; state.ly = e.clientY;
+  if (state.mode === 'planet' || state.mode === 'rabbit') {
+    state.yaw += dx * 2.5;
+  } else {
+    state.yaw -= dx * 2.5;
+    state.pitch = clamp(state.pitch + dy * 1.6, -1.35, 1.35);
+  }
+  state.dirty = true;
+});
+canvas.addEventListener('pointerup', () => {
+  state.drag = false; canvas.classList.remove('dragging');
+});
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (state.mode === 'planet' || state.mode === 'rabbit') {
+    state.zoom = clamp(state.zoom * (1 + e.deltaY * 0.001), 0.25, 4);
+  } else {
+    state.fov = clamp(state.fov + e.deltaY * 0.08, 20, 220);
+  }
+  state.dirty = true;
+}, { passive: false });
+canvas.addEventListener('dblclick', () => {
+  state.yaw = 0; state.pitch = 0; state.fov = 100; state.zoom = 1; state.dirty = true;
+});
+
+document.querySelectorAll('.bar button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.bar button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    state.mode = btn.dataset.mode;
+    state.dirty = true;
+  });
+});
+</script>
+</body>
+</html>

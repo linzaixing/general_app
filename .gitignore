@@ -1,18 +1,8 @@
-*.iml
-.gradle
-/local.properties
-/.idea/
-.DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
-local.properties
+*.iml .gradle /local.properties /.idea/ .DS_Store /build /captures .externalNativeBuild .cxx local.properties  # App build outputs app/build/ app/release/  # Gradle **/build/ .kotlin/ 
 
-# App build outputs
-app/build/
-app/release/
-
-# Gradle
-**/build/
-.kotlin/
+ # Pano camera artifacts
+out/
+*.apk
+*.apk.*
+__pycache__/
+*.pyc 
