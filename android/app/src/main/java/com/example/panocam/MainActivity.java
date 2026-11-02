@@ -75,15 +75,14 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private static final int[][] CANDIDATES = {
             {2560, 1280}, {1920, 960}, {1280, 640}, {1280, 720}, {640, 480}, {3008, 1504}
     };
-    /** 预览拼接分辨率（网页端显示用，可以低一些）。 */
-    private static final int EQ_W = 1024;
-    private static final int EQ_H = 512;
+    /** 预览拼接宽度/保存分辨率由页面「画质」选项下发，这里只是默认值。 */
+    private static final int PREVIEW_OUT_W = 1024;
+    private static final int SAVE_OUT_W = 2048;
     /** 预览回读尺寸（2:1，与双鱼眼画面一致）。 */
     private static final int CAPTURE_W = 1280;
     private static final int CAPTURE_H = 640;
-    /** 录制/拍照的原图上限：源不超过 2560 宽，输出不超过 2048x1024（2:1）。 */
+    /** 录制/拍照原图的采集上限（源宽），输出宽度由页面选择的保存分辨率决定。 */
     private static final int HI_SRC_MAX_W = 2560;
-    private static final int HI_OUT_MAX_W = 2048;
     private static final int VIEW_W = 640;
     private static final int VIEW_H = 360;
     private static final int PLANET_SIZE = 512;
@@ -173,6 +172,11 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private int[] stitchBuf;
     private int[] stitchBufHi;
     private int eqW, eqH;
+    /** 页面「画质」选择：预览拼接宽度、保存原图宽度（均为 2:1 的宽）。 */
+    private volatile int previewOutW = PREVIEW_OUT_W;
+    private volatile int saveOutW = SAVE_OUT_W;
+    /** 防抖：开启时把重力 roll 烘进录制/拍照的原图，锁定地平线。 */
+    private volatile boolean stabilize;
     private int viewMode = PanoStitcher.MODE_PERSPECTIVE;
     private float viewFov = 110f;
     private Bitmap renderBitmap;
@@ -976,6 +980,26 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             }
         }
 
+        /** 页面「画质」选项：预览拼接宽度 / 保存原图宽度（2:1 的宽）。 */
+        @JavascriptInterface
+        public void setQuality(int prevW, int saveW) {
+            previewOutW = Math.max(512, Math.min(1536, prevW));
+            saveOutW = Math.max(512, Math.min(4096, saveW));
+            runOnUiThread(MainActivity.this::updateStatus);
+        }
+
+        /** 防抖开关：开启后预览、录制、拍照都按重力 roll 锁定地平线；关闭则用相机原始朝向。 */
+        @JavascriptInterface
+        public void setStabilize(boolean on) {
+            stabilize = on;
+            if (on) {
+                bridge.setRoll(rollDeg);
+            } else {
+                bridge.setRoll(0f);
+            }
+            runOnUiThread(MainActivity.this::updateStatus);
+        }
+
         @JavascriptInterface
         public void requestRaw() {
             rawRequested = true;
@@ -1066,8 +1090,9 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             sb.append('\n').append(sizeInfo);
         }
         sb.append("\n采集 ").append(CAPTURE_W).append('x').append(CAPTURE_H)
-                .append(" · 预览 ").append(EQ_W).append('x').append(EQ_H)
-                .append(" · 原图 ").append(hiOutW()).append('x').append(hiOutW() / 2);
+                .append(" · 预览 ").append(previewOutW).append('x').append(previewOutW / 2)
+                .append(" · 原图 ").append(hiOutW()).append('x').append(hiOutW() / 2)
+                .append(stabilize ? " · 防抖开" : " · 防抖关");
         if (liveFps > 0) {
             sb.append(String.format(Locale.US, "\n实时 %.1f fps · %.0f ms/帧", liveFps, liveFrameMs));
         }
@@ -1165,6 +1190,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         final int fh = size[1];
         final int ow = hiOutW();
         final int oh = ow / 2;
+        final float rollRad = stabilize ? (float) Math.toRadians(rollDeg) : 0f;
         sendToPage("window.panoOnEvent && panoOnEvent('shutter','')");
         new Thread(() -> {
             String msg;
@@ -1172,6 +1198,9 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 int[] eq = PanoStitcher.stitchEquirectFast(frame, fw, fh, ow, oh, null);
                 if (eq == null) {
                     throw new IllegalStateException("拼接失败");
+                }
+                if (rollRad != 0f) {
+                    eq = PanoStitcher.rotateEquirect(eq, ow, oh, rollRad);
                 }
                 Bitmap bmp = Bitmap.createBitmap(eq, ow, oh, Bitmap.Config.ARGB_8888);
                 ByteArrayOutputStream bos = new ByteArrayOutputStream();
@@ -1254,14 +1283,14 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         final int fh = size[1];
         new Thread(() -> {
             try {
-                int[] eq = PanoStitcher.stitchEquirectFast(frame, fw, fh, EQ_W, EQ_H, stitchBuf);
+                int[] eq = PanoStitcher.stitchEquirectFast(frame, fw, fh, previewOutW, previewOutW / 2, stitchBuf);
                 if (eq == null) {
                     throw new IllegalStateException("拼接失败");
                 }
                 stitchBuf = eq;
                 equirectPixels = eq;
-                eqW = EQ_W;
-                eqH = EQ_H;
+                eqW = previewOutW;
+                eqH = previewOutW / 2;
                 saveEquirect(eq);
                 ui.post(() -> {
                     stitching = false;
@@ -1323,12 +1352,9 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         return px;
     }
 
-    /** 录制/拍照原图尺寸：2:1，宽不超过 2048。 */
+    /** 录制/拍照原图尺寸：按页面选择的保存分辨率，且不超过采集源宽度。 */
     private int hiOutW() {
-        int w = previewW > 0 ? previewW : CAPTURE_W;
-        if (w > HI_OUT_MAX_W) {
-            w = HI_OUT_MAX_W;
-        }
+        int w = Math.min(saveOutW, hiSrcW());
         return w & ~1;
     }
 
@@ -1350,7 +1376,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     private void saveEquirect(int[] eq) {
         try {
-            Bitmap bmp = Bitmap.createBitmap(eq, EQ_W, EQ_H, Bitmap.Config.ARGB_8888);
+            Bitmap bmp = Bitmap.createBitmap(eq, eqW, eqH, Bitmap.Config.ARGB_8888);
             File dir = getExternalFilesDir(null);
             if (dir != null) {
                 File f = new File(dir, "equirect.jpg");
@@ -1432,8 +1458,9 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             return;
         }
         long t0 = System.nanoTime();
-        // 录制时按相机原生分辨率回读并拼高分辨率原图，预览仍降到 1024x512
-        final boolean recording = recorder != null;
+        // 录制时按相机原生分辨率回读并拼高分辨率原图，预览仍降到页面上限
+        EquirectRecorder rec = recorder;
+        final boolean recording = rec != null;
         int[] size = new int[2];
         int[] frame = recording ? captureHighRes(size) : capturePreview(size);
         long t1 = System.nanoTime();
@@ -1444,8 +1471,11 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         }
         final int fw = size[0];
         final int fh = size[1];
-        final int ow = recording ? hiOutW() : EQ_W;
-        final int oh = recording ? ow / 2 : EQ_H;
+        // 尺寸跟编码器走：录制中改画质只影响下一次录制，不会把这一条视频写坏
+        final int ow = recording ? rec.width() : previewOutW;
+        final int oh = ow / 2;
+        // 防抖：把这一帧的重力 roll 一起带进拼接线程，预览/录像用的是同一时刻的角度
+        final float rollRad = stabilize ? (float) Math.toRadians(rollDeg) : 0f;
         renderExec.execute(() -> {
             long t2 = System.nanoTime();
             try {
@@ -1462,12 +1492,11 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                     eqW = ow;
                     eqH = oh;
                     // 录制时把这一帧直接送进 2:1 原图编码器（在拼接线程里同步拷进纹理）
-                    EquirectRecorder rec = recorder;
-                    if (recording && rec != null) {
-                        rec.push(eq);
+                    if (recording) {
+                        rec.push(eq, rollRad);
                     }
-                    // 预览仍按 1024 宽推送，避免 WebView 每帧处理高分辨率
-                    bridge.pushFrame(encodeJpeg(eq, ow, oh, recording ? EQ_W : 0));
+                    // 预览按页面选择的预览宽度推送，避免 WebView 每帧处理高分辨率
+                    bridge.pushFrame(encodeJpeg(eq, ow, oh, recording ? previewOutW : 0));
                 }
                 long t4 = System.nanoTime();
                 // 实时帧率：按相邻两帧完成时刻的间隔估计，再做指数平滑
@@ -1598,11 +1627,16 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             ax = ax + (event.values[0] - ax) * 0.25f;
             ay = ay + (event.values[1] - ay) * 0.25f;
             az = az + (event.values[2] - az) * 0.25f;
-            // 只有重力主要落在屏幕平面内（手机大致竖直）时，roll 才有定义
+            // 只有重力主要落在屏幕平面内（手机大致竖直）时，roll 才有定义。
+            // 这里保持设备轴：预览的画面朝向一直按这个 roll 摆正（网页端拖动/陀螺仪增量
+            // 都按同一个 roll 旋转），录制/拍照是否把 roll 烘进原图由「防抖」开关决定。
             if (Math.hypot(ax, ay) > 4f) {
                 float r = (float) Math.toDegrees(Math.atan2(ax, ay));
-                rollDeg += (r - rollDeg) * 0.18f;
-                bridge.setRoll(rollDeg);
+                float d = r - rollDeg;
+                d = ((d + 540f) % 360f) - 180f;    // 跨 ±180° 时走短边，避免整圈回绕
+                rollDeg += d * 0.18f;
+                // 防抖关闭时预览也不做补偿，保证「看到的就是保存下来的朝向」
+                bridge.setRoll(stabilize ? rollDeg : 0f);
             }
             onGestureTilt();
             return;
