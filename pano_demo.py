@@ -6,7 +6,7 @@ import http.server
 import os
 
 import cv2
-import stitch_air
+import stitch_fisheye
 
 CACHE = {}
 
@@ -15,10 +15,22 @@ def build_equirect(photo, width=1920, height=960):
     img = cv2.imread(photo)
     if img is None:
         raise RuntimeError("读不到图片: " + photo)
-    lenses, ow, oh = stitch_air.parse_offset(stitch_air.DEFAULT_OFFSET, img.shape[1])
-    p = stitch_air.auto_align(img, lenses, 10.0)
-    eq = stitch_air.equirect(img, lenses, p, width, height)
+    lenses, ow, oh = stitch_fisheye.parse_offset(stitch_fisheye.DEFAULT_OFFSET, img.shape[1])
+    p = stitch_fisheye.auto_align(img, lenses, 10.0)
+    eq = stitch_fisheye.equirect(img, lenses, p, width, height)
     ok, buf = cv2.imencode(".jpg", eq, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    return buf.tobytes()
+
+
+def build_raw(photo, width=1600):
+    """原始双鱼眼原图，供页面做「原图 / 拼接」对比。"""
+    img = cv2.imread(photo)
+    if img is None:
+        raise RuntimeError("读不到图片: " + photo)
+    h, w = img.shape[:2]
+    if w > width:
+        img = cv2.resize(img, (width, int(h * width / w)), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])
     return buf.tobytes()
 
 
@@ -32,6 +44,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if "eq" not in CACHE:
                 CACHE["eq"] = build_equirect(self.server.photo)
             data = CACHE["eq"]
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if path == "/raw.jpg":
+            if "raw" not in CACHE:
+                CACHE["raw"] = build_raw(self.server.photo)
+            data = CACHE["raw"]
             self.send_response(200)
             self.send_header("Content-Type", "image/jpeg")
             self.send_header("Content-Length", str(len(data)))

@@ -7,13 +7,30 @@ android {
         applicationId "com.example.panocam"
         minSdk 24
         targetSdk 34
-        versionCode 8
-        versionName "1.7"
+        versionCode 18
+        versionName "1.17"
+    }
+    sourceSets {
+        main {
+            // pano_demo.html 由 syncWebAssets 在构建前从仓库根目录拷进来
+            assets.srcDirs += ['src/main/assets']
+        }
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+}
+
+// App 的全景查看器直接复用网页端页面：每次构建前从仓库根目录同步，
+// 保证「网页改一次，App 跟着变」，不会出现两份 UI 各自漂移。
+tasks.register('syncWebAssets', Copy) {
+    from "${rootProject.projectDir.parentFile}/pano_demo.html"
+    into 'src/main/assets'
+    rename { 'pano_demo.html' }
+}
+tasks.matching { it.name == 'preBuild' }.configureEach {
+    dependsOn tasks.named('syncWebAssets')
 }
 
 dependencies {

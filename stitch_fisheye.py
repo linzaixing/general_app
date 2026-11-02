@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-stitch_air.py -- 用 App 自带的 offset 参数做 Air 双鱼眼拼接（不含防抖）
+stitch_fisheye.py -- 用 App 自带的 offset 参数做全景拼接（不含防抖）
 
 参数来源：assets/sample/photo.insp 里的 offset 字段
   2_766.580_754.000_748.740_0.000_0.000_90.000_781.580_2259.760_753.000_-0.400_0.000_90.800_3008_1504_1035
 
 用法：
-  python stitch_air.py --photo sample.jpg --out out/equirect.jpg --view
-  python stitch_air.py --video raw.avi --out out/stitched.mp4
-  python stitch_air.py --photo sample.jpg --dry-run
+  python stitch_fisheye.py --photo sample.jpg --out out/equirect.jpg --view
+  python stitch_fisheye.py --video raw.avi --out out/stitched.mp4
+  python stitch_fisheye.py --photo sample.jpg --dry-run
 """
 
 import argparse
@@ -245,7 +245,7 @@ def run_video(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Air 双鱼眼拼接（App offset 参数）")
+    ap = argparse.ArgumentParser(description="全景拼接（App offset 参数）")
     ap.add_argument("--photo")
     ap.add_argument("--video")
     ap.add_argument("--out")
