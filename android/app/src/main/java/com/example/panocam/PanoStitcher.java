@@ -318,6 +318,65 @@ public final class PanoStitcher {
         return out;
     }
 
+    /**
+     * 把 2:1 等距图绕前方轴（z）旋转 roll 弧度，用于防抖时把地平线摆正。
+     * 与网页端着色器 rotateRoll 语义一致；输出尺寸不变，经度方向环绕采样。
+     */
+    public static int[] rotateEquirect(int[] src, int w, int h, float rollRad) {
+        if (src == null || w <= 1 || h <= 1 || rollRad == 0f) {
+            return src;
+        }
+        int[] out = new int[w * h];
+        float c = (float) Math.cos(rollRad);
+        float s = (float) Math.sin(rollRad);
+        for (int y = 0; y < h; y++) {
+            double lat = Math.PI / 2.0 - Math.PI * y / (h - 1);
+            float clat = (float) Math.cos(lat);
+            float slat = (float) Math.sin(lat);
+            int row = y * w;
+            for (int x = 0; x < w; x++) {
+                double lon = -Math.PI + 2.0 * Math.PI * x / w;
+                float dx = clat * (float) Math.sin(lon);
+                float dz = clat * (float) Math.cos(lon);
+                float ex = dx * c - slat * s;
+                float ey = dx * s + slat * c;
+                float lon2 = (float) Math.atan2(ex, dz);
+                float lat2 = (float) Math.asin(clampf(ey, -1f, 1f));
+                float u = (lon2 / (2f * (float) Math.PI) + 0.5f) * w;
+                float v = (0.5f - lat2 / (float) Math.PI) * (h - 1);
+                out[row + x] = bilinearWrap(src, w, h, u, v);
+            }
+        }
+        return out;
+    }
+
+    private static int bilinearWrap(int[] px, int w, int h, float u, float v) {
+        if (v < 0f) {
+            v = 0f;
+        } else if (v > h - 1) {
+            v = h - 1;
+        }
+        int x0 = (int) Math.floor(u);
+        int y0 = (int) Math.floor(v);
+        float fx = u - x0;
+        float fy = v - y0;
+        int y1 = Math.min(y0 + 1, h - 1);
+        int xa = ((x0 % w) + w) % w;
+        int xb = ((x0 + 1) % w + w) % w;
+        int p00 = px[y0 * w + xa], p10 = px[y0 * w + xb];
+        int p01 = px[y1 * w + xa], p11 = px[y1 * w + xb];
+        return mixPx(mixPx(p00, p10, fx), mixPx(p01, p11, fx), fy);
+    }
+
+    private static int mixPx(int a, int b, float t) {
+        int ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;
+        int br = (b >> 16) & 255, bg = (b >> 8) & 255, bb = b & 255;
+        int r = (int) (ar + (br - ar) * t);
+        int g = (int) (ag + (bg - ag) * t);
+        int bl = (int) (ab + (bb - ab) * t);
+        return 0xFF000000 | (r << 16) | (g << 8) | bl;
+    }
+
     private static void stitchRows(EquirectLut lut, int[] frame, int[] out, int yStart, int yEnd) {
         int ow = lut.ow;
         int stride = lut.fw;

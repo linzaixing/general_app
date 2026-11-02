@@ -88,6 +88,21 @@
     cursor:pointer; background:rgba(255,255,255,.16); color:#fff; }
   .spotdlg button.primary { background:#fff; color:#111; }
 
+  /* 画质设置弹层 */
+  .qdlg { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+    display:none; flex-direction:column; gap:12px; padding:16px 18px; border-radius:16px;
+    background:rgba(20,20,20,.92); z-index:6; box-shadow:0 10px 40px rgba(0,0,0,.6); }
+  .qdlg.on { display:flex; }
+  .qdlg .row { display:flex; align-items:center; gap:10px; color:#ddd; font-size:13px; }
+  .qdlg .row span { width:72px; }
+  .qdlg .seg { display:flex; gap:6px; }
+  .qdlg .seg button { border:0; border-radius:8px; padding:6px 12px; font-size:13px;
+    background:rgba(255,255,255,.12); color:#eee; cursor:pointer; }
+  .qdlg .seg button.on { background:#fff; color:#111; }
+  .qdlg .seg button:hover { background:rgba(255,255,255,.22); }
+  .qdlg .close { border:0; border-radius:8px; padding:8px 12px; font-size:13px;
+    cursor:pointer; background:#fff; color:#111; align-self:flex-end; }
+
   .toast { position:fixed; bottom:70px; left:50%; transform:translate(-50%,10px);
     background:rgba(20,20,20,.9); color:#fff; font-size:13px; padding:10px 16px;
     border-radius:999px; z-index:4; opacity:0; transition:opacity .2s, transform .2s;
@@ -131,6 +146,8 @@
 <div class="tools">
   <button id="btnRec">录制</button>
   <button id="btnShot">拍照</button>
+  <button id="btnStab">防抖</button>
+  <button id="btnQuality">画质</button>
   <button id="btnGyro">陀螺仪</button>
   <button id="btnHunt">寻宝游戏</button>
   <button id="btnMag">放大镜</button>
@@ -156,6 +173,19 @@
   <button class="primary" id="spotOk">确定</button>
   <button id="spotCancel">取消</button>
 </div>
+<div class="qdlg" id="qDlg">
+  <div class="row"><span>预览分辨率</span>
+    <div class="seg" id="qPrev">
+      <button data-w="640">低</button><button data-w="1024">中</button><button data-w="1536">高</button>
+    </div>
+  </div>
+  <div class="row"><span>保存分辨率</span>
+    <div class="seg" id="qSave">
+      <button data-w="1024">1024×512</button><button data-w="2048">2048×1024</button><button data-w="4096">4096×2048</button>
+    </div>
+  </div>
+  <button class="close" id="qClose">关闭</button>
+</div>
 <div class="err" id="err"></div>
 <div class="hint">拖动旋转 · 滚轮缩放 · 双击复位</div>
 
@@ -164,6 +194,17 @@ const canvas = document.getElementById('c');
 const DEG = Math.PI / 180;
 // App 端（Android WebView）会注入 PanoHost；网页端没有则为 null
 const HOST = window.PanoHost || null;
+
+// 画质 / 防抖设置：网页与 App 共用；App 端会把数值下发给原生拼接
+const QUALITY_KEY = 'pano-quality-v1';
+const STAB_KEY = 'pano-stab-v1';
+let quality = { preview: 1024, save: 2048 };
+try {
+  const q = JSON.parse(localStorage.getItem(QUALITY_KEY) || 'null');
+  if (q && q.preview && q.save) quality = q;
+} catch (e) {}
+// 防抖默认开启：预览和保存的原图都按重力 roll 锁定地平线；关掉则用相机原始朝向
+let stabilize = localStorage.getItem(STAB_KEY) !== '0';
 
 // ---------------------------------------------------------------------------
 // 着色器：每像素反推球面方向，按投影模式采样 equirect 贴图
@@ -450,8 +491,14 @@ function flyTo(lon, lat) {
 // --- 尺寸 / 渲染 ------------------------------------------------------------
 function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
-  const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  let w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+  let h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  // 预览分辨率上限：网页端控制渲染清晰度/开销，App 端另由原生拼接尺寸决定
+  if (w > quality.preview) {
+    const k = quality.preview / w;
+    w = quality.preview;
+    h = Math.max(1, Math.round(h * k));
+  }
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w;
     canvas.height = h;
@@ -748,11 +795,16 @@ canvas.addEventListener('pointermove', e => {
     const vSpan = cur.fov * DEG;
     const hSpan = (mode === 3) ? vSpan
       : 2 * Math.atan(Math.tan(cur.fov * DEG / 2) * aspect);
+    // 画面会被 roll（地平线补偿）整体旋转，拖动增量必须按同一个角度转过去，
+    // 否则竖向拖动会变成横向旋转、横向拖动会变成竖向旋转
+    const cr = Math.cos(cur.roll), sr = Math.sin(cur.roll);
+    const dYaw = (dx * hSpan) * cr + (dy * vSpan) * sr;
+    const dPitch = -(dx * hSpan) * sr + (dy * vSpan) * cr;
     // 拖动方向 = 视角转动方向（左右、上下都不再反向）
-    target.yaw += dx * hSpan;
-    target.pitch += dy * vSpan;   // 不夹紧，竖直方向可连续转 360°
-    vYaw = dx * hSpan * 60;
-    vPitch = dy * vSpan * 60;
+    target.yaw += dYaw;
+    target.pitch += dPitch;   // 不夹紧，竖直方向可连续转 360°
+    vYaw = dYaw * 60;
+    vPitch = dPitch * 60;
   }
 });
 
@@ -1055,8 +1107,8 @@ function pickRecMime() {
 let eqCanvas = null, eqCtx = null, eqTimer = 0;
 
 function drawEquirectFrame() {
-  const w = img.naturalWidth, h = img.naturalHeight;
-  if (!w || !h) return false;
+  if (!img.naturalWidth || !img.naturalHeight) return false;
+  const w = quality.save, h = Math.round(quality.save / 2);
   if (!eqCanvas) {
     eqCanvas = document.createElement('canvas');
     eqCtx = eqCanvas.getContext('2d');
@@ -1122,7 +1174,7 @@ function takePhoto() {
     return;
   }
   if (!img.complete || !img.naturalWidth) { toast('画面尚未就绪'); return; }
-  const w = img.naturalWidth, h = img.naturalHeight;
+  const w = quality.save, h = Math.round(quality.save / 2);
   const c = document.createElement('canvas');
   c.width = w; c.height = h;
   c.getContext('2d').drawImage(img, 0, 0, w, h);
@@ -1159,6 +1211,45 @@ window.panoOnEvent = function (name, msg) {
 
 btnRec.addEventListener('click', toggleRecord);
 btnShot.addEventListener('click', takePhoto);
+
+// --- 画质 / 防抖 -------------------------------------------------------------
+const btnStab = document.getElementById('btnStab');
+const btnQuality = document.getElementById('btnQuality');
+const qDlg = document.getElementById('qDlg');
+
+function applyQuality(prevW, saveW) {
+  if (prevW) quality.preview = prevW;
+  if (saveW) quality.save = saveW;
+  localStorage.setItem(QUALITY_KEY, JSON.stringify(quality));
+  document.querySelectorAll('#qPrev button').forEach(b =>
+    b.classList.toggle('on', Number(b.dataset.w) === quality.preview));
+  document.querySelectorAll('#qSave button').forEach(b =>
+    b.classList.toggle('on', Number(b.dataset.w) === quality.save));
+  if (HOST && HOST.setQuality) HOST.setQuality(quality.preview, quality.save);
+}
+
+btnQuality.addEventListener('click', () => qDlg.classList.toggle('on'));
+document.getElementById('qClose').addEventListener('click', () => qDlg.classList.remove('on'));
+document.querySelectorAll('#qPrev button').forEach(b =>
+  b.addEventListener('click', () => applyQuality(Number(b.dataset.w), 0)));
+document.querySelectorAll('#qSave button').forEach(b =>
+  b.addEventListener('click', () => applyQuality(0, Number(b.dataset.w))));
+
+function setStabilize(on, quiet) {
+  stabilize = on;
+  btnStab.classList.toggle('on', on);
+  localStorage.setItem(STAB_KEY, on ? '1' : '0');
+  if (HOST && HOST.setStabilize) HOST.setStabilize(on);
+  if (!quiet) {
+    toast(on ? (HOST ? '防抖开启：录制/拍照会锁定地平线'
+                      : '网页端不支持防抖，App 内生效')
+             : '防抖关闭');
+  }
+}
+
+btnStab.addEventListener('click', () => setStabilize(!stabilize, false));
+applyQuality(0, 0);
+setStabilize(stabilize, true);
 
 // --- 深链接 ----------------------------------------------------------------
 (function applyDeepLink() {
@@ -1201,8 +1292,10 @@ function pollHost(now) {
     const dp = Number(parts[1]);
     const rl = Number(parts[2]);
     if (!dragging && Number.isFinite(dy) && Number.isFinite(dp)) {
-      target.yaw += dy * DEG;
-      target.pitch += dp * DEG;
+      // 陀螺仪增量来自界面坐标系，同样要跟着 roll 一起转
+      const cr = Math.cos(cur.roll), sr = Math.sin(cur.roll);
+      target.yaw += (dy * cr + dp * sr) * DEG;
+      target.pitch += (-dy * sr + dp * cr) * DEG;
     }
     if (Number.isFinite(rl)) rollTarget = rl * DEG;   // 重力水平补偿
   }

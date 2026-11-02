@@ -43,8 +43,20 @@ public class EquirectRecorder {
             "attribute vec2 aPos; attribute vec2 aTex; varying vec2 vTex;" +
             "void main(){ gl_Position=vec4(aPos,0.0,1.0); vTex=aTex; }";
     private static final String FS =
-            "precision mediump float; varying vec2 vTex; uniform sampler2D uTex;" +
-            "void main(){ gl_FragColor=texture2D(uTex, vTex); }";
+            "precision mediump float; varying vec2 vTex; uniform sampler2D uTex; uniform float uRoll;" +
+            "void main(){" +
+            "  float lon = (vTex.x - 0.5) * 6.28318530718;" +
+            "  float lat = (0.5 - vTex.y) * 3.14159265359;" +
+            "  float cl = cos(lat);" +
+            "  vec3 d = vec3(cl * sin(lon), sin(lat), cl * cos(lon));" +
+            // 防抖：绕前方轴（z）旋转 uRoll，把地平线摆正（与网页端着色器同一语义）
+            "  float c = cos(uRoll), s = sin(uRoll);" +
+            "  vec3 e = vec3(d.x * c - d.y * s, d.x * s + d.y * c, d.z);" +
+            "  float lon2 = atan(e.x, e.z);" +
+            "  float lat2 = asin(clamp(e.y, -1.0, 1.0));" +
+            "  vec2 uv = vec2(lon2 / 6.28318530718 + 0.5, 0.5 - lat2 / 3.14159265359);" +
+            "  gl_FragColor = texture2D(uTex, uv);" +
+            "}";
 
     private final Context context;
     private final int width, height;
@@ -65,7 +77,7 @@ public class EquirectRecorder {
     private EGLDisplay eglDisplay = EGL14.EGL_NO_DISPLAY;
     private EGLContext eglContext = EGL14.EGL_NO_CONTEXT;
     private EGLSurface eglSurface = EGL14.EGL_NO_SURFACE;
-    private int program, texId, aPos, aTex, uTex;
+    private int program, texId, aPos, aTex, uTex, uRoll;
     private FloatBuffer posQuad, texQuad;
 
     public EquirectRecorder(Context context, int width, int height) {
@@ -167,6 +179,7 @@ public class EquirectRecorder {
         aPos = GLES20.glGetAttribLocation(program, "aPos");
         aTex = GLES20.glGetAttribLocation(program, "aTex");
         uTex = GLES20.glGetUniformLocation(program, "uTex");
+        uRoll = GLES20.glGetUniformLocation(program, "uRoll");
 
         float[] p = {-1, -1, 1, -1, -1, 1, 1, 1};
         float[] t = {0, 1, 1, 1, 0, 0, 1, 0};   // 图片上下翻转
@@ -179,7 +192,10 @@ public class EquirectRecorder {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+        // 旋转后的采样坐标始终落在 0..1（经度由 atan2 归一化），用 CLAMP_TO_EDGE 即可；
+        // 采集源宽度可能不是 2 的幂，GLES2 下 NPOT 纹理不能配 REPEAT，否则整张纹理会失效
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S,
+                GLES20.GL_CLAMP_TO_EDGE);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
 
         EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE,
@@ -212,8 +228,13 @@ public class EquirectRecorder {
         return s;
     }
 
-    /** 送一帧拼接好的 2:1 等距原图。必须拷贝到编码器自己的 Bitmap，调用方的缓冲会复用。 */
-    public synchronized void push(int[] argb) {
+    /** 编码宽高（录制期间固定，页面改画质也不会影响正在写入的视频）。 */
+    public int width() {
+        return width;
+    }
+
+    /** 送一帧拼接好的 2:1 等距原图；rollRad != 0 时在编码前把地平线摆正。必须拷贝到自己的 Bitmap。 */
+    public synchronized void push(int[] argb, float rollRad) {
         if (!active || codec == null || eglSurface == EGL14.EGL_NO_SURFACE) {
             return;
         }
@@ -236,6 +257,7 @@ public class EquirectRecorder {
                 GLUtils.texSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, bitmap);
             }
             GLES20.glUniform1i(uTex, 0);
+            GLES20.glUniform1f(uRoll, rollRad);
 
             GLES20.glEnableVertexAttribArray(aPos);
             GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, posQuad);
