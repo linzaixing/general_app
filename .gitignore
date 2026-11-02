@@ -1,16 +1,23 @@
 # 构建产物与缓存
 out/
+.gradle/
+**/build/
+.idea/
+*.iml
+local.properties
 android/.gradle/
 android/build/
 android/app/build/
 android/build.log
-android/local.properties
+
 # 构建时从仓库根目录同步生成的网页副本
 android/app/src/main/assets/pano_demo.html
 
- # Pano camera artifacts
-out/
+# 二进制包（体积过大，不入库）
 *.apk
 *.apk.*
+base.apk(2).1
+
+# Python 缓存
 __pycache__/
-*.pyc 
+*.pyc
