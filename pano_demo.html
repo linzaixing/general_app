@@ -1,177 +1,1247 @@
-
 <!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Air 全景查看器</title>
+<title>全景查看器</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
   canvas { position:fixed; inset:0; width:100%; height:100%; display:block;
-    touch-action:none; cursor:grab; }
+    touch-action:none; cursor:grab; z-index:0; }
   canvas.dragging { cursor:grabbing; }
+
   .bar { position:fixed; top:18px; left:50%; transform:translateX(-50%);
+    width:max-content; max-width:calc(100vw - 20px);
     display:flex; gap:8px; padding:8px; border-radius:999px;
-    background:rgba(0,0,0,.55); backdrop-filter:blur(8px); z-index:2; }
+    background:rgba(0,0,0,.55); backdrop-filter:blur(8px); z-index:3; }
   .bar button { border:0; border-radius:999px; padding:10px 16px;
     background:transparent; color:#eee; font-size:14px; cursor:pointer; }
   .bar button.active { background:#fff; color:#111; }
+
   .title { position:fixed; top:20px; left:20px; color:#fff; font-size:15px;
-    letter-spacing:.04em; z-index:2; opacity:.85; }
+    letter-spacing:.04em; z-index:3; opacity:.85; }
+
+  .tools { position:fixed; top:84px; right:18px; display:flex; flex-direction:column;
+    gap:6px; padding:8px; border-radius:16px; background:rgba(0,0,0,.55);
+    backdrop-filter:blur(8px); z-index:3; }
+  .tools button { border:0; border-radius:10px; padding:8px 12px; min-width:104px;
+    background:rgba(255,255,255,.08); color:#eee; font-size:13px; cursor:pointer;
+    text-align:left; }
+  .tools button:hover { background:rgba(255,255,255,.18); }
+  .tools button.on { background:#fff; color:#111; }
+
   .hint { position:fixed; bottom:18px; left:50%; transform:translateX(-50%);
-    color:#bbb; font-size:13px; z-index:2; background:rgba(0,0,0,.45);
+    color:#bbb; font-size:13px; z-index:3; background:rgba(0,0,0,.45);
     padding:8px 14px; border-radius:999px; white-space:nowrap; }
+
+  .hud { position:fixed; top:52px; left:20px; color:#eaeaea; font-size:13px;
+    z-index:3; background:rgba(0,0,0,.45); padding:8px 14px; border-radius:12px;
+    display:none; line-height:1.6; }
+  .hud.on { display:block; }
+
+  .layer { position:fixed; inset:0; z-index:2; pointer-events:none; }
+
+  .spot { position:absolute; transform:translate(-50%,-50%); pointer-events:auto;
+    cursor:pointer; display:flex; align-items:center; gap:6px; }
+  .spot i { width:14px; height:14px; border-radius:50%; background:#ffd166;
+    box-shadow:0 0 0 3px rgba(255,209,102,.35), 0 0 12px rgba(255,209,102,.9);
+    display:block; }
+  .spot b { font-weight:500; font-size:12px; color:#111; background:rgba(255,255,255,.88);
+    padding:3px 8px; border-radius:999px; white-space:nowrap; opacity:0; transition:opacity .15s; }
+  .spot:hover b { opacity:1; }
+  .spot.hide { display:none; }
+
+  .target { position:absolute; transform:translate(-50%,-50%); pointer-events:none;
+    width:44px; height:44px; border-radius:50%;
+    border:2px solid #4ade80; box-shadow:0 0 18px rgba(74,222,128,.85);
+    animation:pulse 1.6s ease-in-out infinite; }
+  .target::after { content:'★'; position:absolute; inset:0; display:grid; place-items:center;
+    color:#4ade80; font-size:18px; }
+  .target.hide { display:none; }
+  @keyframes pulse { 0%,100% { transform:translate(-50%,-50%) scale(.9); opacity:.85; }
+    50% { transform:translate(-50%,-50%) scale(1.12); opacity:.35; } }
+
+  .mag { position:fixed; right:18px; bottom:70px; width:200px; height:200px;
+    border-radius:16px; border:1px solid rgba(255,255,255,.35); display:none;
+    z-index:2; pointer-events:none; box-shadow:0 8px 30px rgba(0,0,0,.6); }
+  .mag.on { display:block; }
+
+  .compare { position:fixed; inset:0; z-index:1; display:none; --split:50%; }
+  .compare.on { display:block; }
+  .compare img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
+    clip-path:inset(0 calc(100% - var(--split)) 0 0); }
+  .compare .handle { position:absolute; top:0; bottom:0; left:var(--split); width:2px;
+    background:rgba(255,255,255,.9); cursor:ew-resize; }
+  .compare .handle::after { content:'原图 | 拼接'; position:absolute; top:50%; left:50%;
+    transform:translate(-50%,-50%); font-size:12px; color:#111; background:#fff;
+    padding:4px 10px; border-radius:999px; white-space:nowrap; }
+
+  .spotdlg { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+    display:none; gap:8px; align-items:center; padding:14px 16px; border-radius:16px;
+    background:rgba(20,20,20,.92); z-index:6; box-shadow:0 10px 40px rgba(0,0,0,.6); }
+  .spotdlg.on { display:flex; }
+  .spotdlg span { color:#ddd; font-size:13px; }
+  .spotdlg input { border:0; border-radius:8px; padding:8px 10px; font-size:13px;
+    background:rgba(255,255,255,.12); color:#fff; width:160px; outline:none; }
+  .spotdlg button { border:0; border-radius:8px; padding:8px 12px; font-size:13px;
+    cursor:pointer; background:rgba(255,255,255,.16); color:#fff; }
+  .spotdlg button.primary { background:#fff; color:#111; }
+
+  .toast { position:fixed; bottom:70px; left:50%; transform:translate(-50%,10px);
+    background:rgba(20,20,20,.9); color:#fff; font-size:13px; padding:10px 16px;
+    border-radius:999px; z-index:4; opacity:0; transition:opacity .2s, transform .2s;
+    pointer-events:none; white-space:nowrap; }
+  .toast.on { opacity:1; transform:translate(-50%,0); }
+
+  /* 录屏指示 + 快门闪光 */
+  .rec { position:fixed; bottom:112px; left:50%; transform:translateX(-50%);
+    display:none; align-items:center; gap:8px; padding:7px 14px; border-radius:999px;
+    background:rgba(190,30,45,.85); color:#fff; font-size:13px; letter-spacing:.06em;
+    z-index:4; pointer-events:none; }
+  .rec.on { display:flex; }
+  .rec i { width:10px; height:10px; border-radius:50%; background:#fff;
+    animation:blink 1.1s ease-in-out infinite; }
+  @keyframes blink { 0%,100% { opacity:1 } 50% { opacity:.2 } }
+
+  .flash { position:fixed; inset:0; background:#fff; opacity:0; pointer-events:none;
+    z-index:4; transition:opacity .35s ease-out; }
+  .flash.on { opacity:1; transition:none; }
+
+  /* App 端实时拼接帧率角标 */
+  .fps { position:fixed; left:18px; bottom:58px; display:none;
+    color:#9fe8ff; font-size:12px; letter-spacing:.03em; z-index:3;
+    background:rgba(0,0,0,.45); padding:6px 10px; border-radius:999px;
+    pointer-events:none; }
+  .fps.on { display:block; }
+
+  .err { position:fixed; inset:0; display:none; place-items:center; z-index:5;
+    color:#f88; font-size:14px; text-align:center; padding:24px; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div class="title">Air 全景查看器</div>
+<div class="title">全景相机查看器</div>
 <div class="bar">
-  <button data-mode="pano" class="active">360° 全景</button>
-  <button data-mode="planet">小行星</button>
-  <button data-mode="rabbit">兔子洞</button>
-  <button data-mode="fisheye">鱼眼</button>
+  <button data-mode="0" class="active">360° 全景</button>
+  <button data-mode="1">小行星</button>
+  <button data-mode="2">兔子洞</button>
+  <button data-mode="3">鱼眼</button>
 </div>
+<div class="tools">
+  <button id="btnRec">录制</button>
+  <button id="btnShot">拍照</button>
+  <button id="btnGyro">陀螺仪</button>
+  <button id="btnHunt">寻宝游戏</button>
+  <button id="btnMag">放大镜</button>
+  <button id="btnGrid">经纬网格</button>
+  <button id="btnSeam">拼接缝标记</button>
+  <button id="btnCompare">原图对比</button>
+  <button id="btnSpot">添加热点</button>
+  <button id="btnLink">复制视角</button>
+  <button id="btnPoster">导出海报</button>
+</div>
+<div class="hud" id="hud"></div>
+<div class="layer" id="spotLayer"></div>
+<div class="layer" id="huntLayer"></div>
+<div class="mag" id="mag"></div>
+<div class="compare" id="compare"><img id="rawImg" alt="原始双鱼眼"><div class="handle" id="cmpHandle"></div></div>
+<div class="toast" id="toast"></div>
+<div class="rec" id="recHud"><i></i><span id="recTime">REC 00:00</span></div>
+<div class="flash" id="flash"></div>
+<div class="fps" id="fpsHud"></div>
+<div class="spotdlg" id="spotDlg">
+  <span>热点名称</span>
+  <input id="spotInput" maxlength="24" placeholder="例如 门口 / 咖啡机">
+  <button class="primary" id="spotOk">确定</button>
+  <button id="spotCancel">取消</button>
+</div>
+<div class="err" id="err"></div>
 <div class="hint">拖动旋转 · 滚轮缩放 · 双击复位</div>
+
 <script>
 const canvas = document.getElementById('c');
-const ctx = canvas.getContext('2d', { willReadFrequently: true });
-const W = 640, H = 360;
-canvas.width = W; canvas.height = H;
+const DEG = Math.PI / 180;
+// App 端（Android WebView）会注入 PanoHost；网页端没有则为 null
+const HOST = window.PanoHost || null;
 
-const state = {
-  mode: 'pano', yaw: Math.PI, pitch: 0, fov: 100, zoom: 1,
-  drag: false, lx: 0, ly: 0, dirty: true
-};
+// ---------------------------------------------------------------------------
+// 着色器：每像素反推球面方向，按投影模式采样 equirect 贴图
+// ---------------------------------------------------------------------------
+const VERT = `
+attribute vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
+`;
 
-let src = null, srcW = 0, srcH = 0;
+const FRAG = `
+precision highp float;
+uniform vec2 uRes;
+uniform vec2 uOrigin;       // 视口在帧缓冲里的左下角，放大镜画在小窗口时必须减掉
+uniform float uYaw, uPitch, uFov, uZoom;
+uniform float uRoll;        // 重力水平补偿（弧度）
+uniform float uGrid;          // 1 = 叠加经纬网格
+uniform float uSeam;          // 1 = 用蓝色 Alpha 标出两镜头融合带
+uniform int uMode;            // 0 全景 1 小行星 2 兔子洞 3 鱼眼
+uniform sampler2D uTex;
+const float PI = 3.141592653589793;
+const float BLEND_RAD = 0.17453293;   // 10°，与拼接参数 BLEND_DEG 一致
 
-const img = new Image();
-img.onload = () => {
-  srcW = img.naturalWidth; srcH = img.naturalHeight;
-  const off = document.createElement('canvas');
-  off.width = srcW; off.height = srcH;
-  const octx = off.getContext('2d');
-  octx.drawImage(img, 0, 0);
-  src = octx.getImageData(0, 0, srcW, srcH).data;
-  requestAnimationFrame(tick);
-};
-img.src = 'equirect.jpg';
-
-function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
-
-function sample(lon, lat, data, out, o) {
-  let x = (lon / (2 * Math.PI) + 0.5) * srcW;
-  x = x - Math.floor(x / srcW) * srcW;
-  let y = (0.5 - lat / Math.PI) * (srcH - 1);
-  y = clamp(y, 0, srcH - 1);
-  const xi = x | 0, yi = y | 0;
-  const j = (yi * srcW + xi) * 4;
-  out[o] = data[j]; out[o + 1] = data[j + 1]; out[o + 2] = data[j + 2]; out[o + 3] = 255;
+// 与 JS 版 rotateDir 一致：先绕 X 轴 pitch，再绕 Y 轴 yaw
+vec3 rotateDir(vec3 d, float yaw, float pitch) {
+  float cy = cos(yaw), sy = sin(yaw);
+  float cp = cos(pitch), sp = sin(pitch);
+  float y1 = d.y * cp - d.z * sp;
+  float z1 = d.y * sp + d.z * cp;
+  return vec3(d.x * cy + z1 * sy, y1, -d.x * sy + z1 * cy);
 }
 
-function rotate(d, yaw, pitch) {
-  const cy = Math.cos(yaw), sy = Math.sin(yaw);
-  const cp = Math.cos(pitch), sp = Math.sin(pitch);
-  let y = d[1] * cp - d[2] * sp;
-  let z = d[1] * sp + d[2] * cp;
-  let x = d[0] * cy + z * sy;
-  z = -d[0] * sy + z * cy;
-  return [x, y, z];
+// 绕视线轴旋转，用于把画面的地平线摆正
+vec3 rotateRoll(vec3 d, float a) {
+  float c = cos(a), s = sin(a);
+  return vec3(d.x * c - d.y * s, d.x * s + d.y * c, d.z);
 }
 
-function render() {
-  if (!src) return;
-  const out = ctx.createImageData(W, H);
-  const data = out.data;
-  const isPlanet = state.mode === 'planet' || state.mode === 'rabbit';
-  const isFisheye = state.mode === 'fisheye';
-  const fovRad = state.fov * Math.PI / 360;
-  const tanF = Math.tan(fovRad);
+void main() {
+  vec2 q = (gl_FragCoord.xy - uOrigin) / uRes;   // 视口内 0..1，原点在左下
+  float u = q.x * 2.0 - 1.0;
+  float vUp = q.y * 2.0 - 1.0;
+  float vDn = -vUp;
+  vec3 d;
 
-  for (let py = 0; py < H; py++) {
-    const v = (py - H / 2) / (H / 2);
-    for (let px = 0; px < W; px++) {
-      const u = (px - W / 2) / (W / 2);
-      let d;
-      if (isPlanet) {
-        const r = Math.hypot(u, v) * state.zoom;
-        const th = 2 * Math.atan(r);
-        const ph = Math.atan2(v, u);
-        const st = Math.sin(th), ct = Math.cos(th);
-        d = [st * Math.cos(ph), (state.mode === 'planet' ? -ct : ct), st * Math.sin(ph)];
-        d = rotate(d, state.yaw, 0);
-      } else if (isFisheye) {
-        const r = Math.hypot(u, v);
-        const th = r * fovRad;
-        const ph = Math.atan2(v, u);
-        const st = Math.sin(th);
-        d = [st * Math.cos(ph), st * Math.sin(ph), Math.cos(th)];
-        d = rotate(d, state.yaw, state.pitch);
-      } else {
-        d = [u * tanF, -v * tanF, 1];
-        d = rotate(d, state.yaw, state.pitch);
-      }
-      const n = Math.hypot(d[0], d[1], d[2]) || 1;
-      const lon = Math.atan2(d[0] / n, d[2] / n);
-      const lat = Math.asin(clamp(d[1] / n, -1, 1));
-      sample(lon, lat, src, data, (py * W + px) * 4);
+  if (uMode == 1 || uMode == 2) {
+    float r = length(vec2(u, vDn)) * uZoom;
+    float th = 2.0 * atan(r);
+    float ph = atan(vDn, u);
+    d = vec3(sin(th) * cos(ph), uMode == 1 ? -cos(th) : cos(th), sin(th) * sin(ph));
+    d = rotateDir(d, uYaw, 0.0);
+  } else if (uMode == 3) {
+    float r = length(vec2(u, vDn));
+    float th = r * uFov * PI / 360.0;
+    float ph = atan(vDn, u);
+    d = vec3(sin(th) * cos(ph), sin(th) * sin(ph), cos(th));
+    d = rotateRoll(d, uRoll);
+    d = rotateDir(d, uYaw, uPitch);
+  } else {
+    // 按宽高比换算，竖屏手机才不会把人像纵向拉长
+    float aspect = uRes.x / uRes.y;
+    float tanF = tan(uFov * PI / 360.0);
+    d = vec3(u * tanF * aspect, vUp * tanF, 1.0);
+    d = rotateRoll(d, uRoll);
+    d = rotateDir(d, uYaw, uPitch);
+  }
+
+  d = normalize(d);
+  float lon = atan(d.x, d.z);
+  float lat = asin(clamp(d.y, -1.0, 1.0));
+  vec2 uv = vec2(lon / (2.0 * PI) + 0.5, 0.5 - lat / PI);
+  vec3 col = texture2D(uTex, uv).rgb;
+
+  if (uSeam > 0.5) {
+    // 两镜头融合发生在 ray.z 落在 ±BLEND 内的区域（对应经度 ±90° 附近）
+    float rz = cos(lat) * cos(lon);
+    if (abs(rz) < sin(BLEND_RAD)) {
+      col = mix(col, vec3(0.16, 0.55, 1.0), 0.45);
     }
   }
-  ctx.putImageData(out, 0, 0);
+
+  if (uGrid > 0.5) {
+    float lonDeg = degrees(lon);
+    float latDeg = degrees(lat);
+    float mLon = abs(fract(lonDeg / 15.0 + 0.5) - 0.5) * 15.0;
+    float mLat = abs(fract(latDeg / 15.0 + 0.5) - 0.5) * 15.0;
+    float lw = uMode >= 1 ? 0.9 : 0.35;   // 小行星/鱼眼视角尺度不同，线宽加粗
+    if (mLon < lw || mLat < lw) col = mix(col, vec3(0.25, 0.9, 1.0), 0.55);
+    if (abs(latDeg) < lw) col = mix(col, vec3(1.0, 0.45, 0.45), 0.6);
+  }
+
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+// ---------------------------------------------------------------------------
+// 相机状态：target 为输入目标，cur 每帧向 target 缓动
+// ---------------------------------------------------------------------------
+const DEFAULT = { yaw: 0, pitch: 0, fov: 100, zoom: 1 };
+const target = { yaw: Math.PI, pitch: 0, fov: 100, zoom: 1 };
+const cur = { ...target, roll: 0 };
+let rollTarget = 0;    // 重力水平补偿（弧度），App 端推送
+const SMOOTH_TAU = 0.06;
+const LIMIT = { fov: [20, 220], zoom: [0.25, 4] };
+
+let mode = 0;
+let ready = false;
+let gridOn = false;
+let seamOn = false;
+let magOn = false;
+let compareOn = false;
+let spotMode = false;     // 添加热点待点击
+let gyroOn = false;
+let magYaw = null, magPitch = null;
+const fling = { yaw: 0, pitch: 0 };
+
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false });
+if (!gl) fail('当前浏览器不支持 WebGL2，无法显示全景。');
+
+function fail(msg) {
+  const el = document.getElementById('err');
+  el.textContent = msg;
+  el.style.display = 'grid';
 }
 
-function tick() {
-  if (state.dirty) {
-    state.dirty = false;
-    render();
+// --- 程序与四边形 -----------------------------------------------------------
+function compile(type, source) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, source);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    fail('着色器编译失败：' + gl.getShaderInfoLog(s));
+    throw new Error(gl.getShaderInfoLog(s));
   }
-  requestAnimationFrame(tick);
+  return s;
+}
+
+const prog = gl ? gl.createProgram() : null;
+if (gl) {
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    fail('着色器链接失败：' + gl.getProgramInfoLog(prog));
+  }
+}
+
+const uni = {};
+if (gl) {
+  ['uRes', 'uOrigin', 'uYaw', 'uPitch', 'uFov', 'uZoom', 'uRoll', 'uGrid', 'uSeam',
+   'uMode', 'uTex'].forEach(n => {
+    uni[n] = gl.getUniformLocation(prog, n);
+  });
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'aPos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+}
+
+// --- 贴图 -------------------------------------------------------------------
+const tex = gl ? gl.createTexture() : null;
+if (gl) {
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER,
+    HOST ? gl.LINEAR : gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+    new Uint8Array([0, 0, 0, 255]));
+}
+
+const img = new Image();
+img.onload = () => uploadTexture(img);
+img.onerror = () => { if (!HOST) fail('加载 equirect.jpg 失败，请用 pano_demo.py 启动后再访问。'); };
+
+function uploadTexture(image) {
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+  if (!HOST) gl.generateMipmap(gl.TEXTURE_2D);   // 实时帧不做 mipmap，省掉每帧开销
+  const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
+  if (aniso) {
+    const max = gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT);
+    gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(max, 8));
+  }
+  ready = true;
+  if (HOST && HOST.frameDone) HOST.frameDone();   // 通知 App 可以拼下一帧了
+}
+
+// 网页端用静态贴图；App 端改由 PanoHost 持续推送实时帧
+if (!HOST) {
+  img.src = 'equirect.jpg';
+} else {
+  document.querySelector('.hint').textContent =
+    '转 90°+ 回正 = 录制 · 上仰再下俯 = 拍照';
+}
+
+// --- 数学 -------------------------------------------------------------------
+function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+
+// 视空间方向 -> 世界方向（与着色器同一旋转顺序）
+function rotateDir(d, yaw, pitch) {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const y1 = d.y * cp - d.z * sp;
+  const z1 = d.y * sp + d.z * cp;
+  return { x: d.x * cy + z1 * sy, y: y1, z: -d.x * sy + z1 * cy };
+}
+
+// 世界方向 -> 视空间方向（rotateDir 的逆）
+function unrotateDir(d, yaw, pitch) {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const x = d.x * cy - d.z * sy;
+  const z = d.x * sy + d.z * cy;
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  return { x, y: d.y * cp + z * sp, z: -d.y * sp + z * cp };
+}
+
+function dirFromLonLat(lon, lat) {
+  const cl = Math.cos(lat);
+  return { x: cl * Math.sin(lon), y: Math.sin(lat), z: cl * Math.cos(lon) };
+}
+
+// 屏幕坐标（CSS 像素）-> 世界方向
+function screenToWorld(cx, cy, cam) {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  const u = (cx / w) * 2 - 1;
+  const vUp = 1 - (cy / h) * 2;
+  const vDn = -vUp;
+  let d;
+  if (mode === 1 || mode === 2) return null;   // 小行星/兔子洞不做拾取
+  if (mode === 3) {
+    const r = Math.hypot(u, vDn);
+    const th = r * cam.fov * DEG / 2;
+    const ph = Math.atan2(vDn, u);
+    d = { x: Math.sin(th) * Math.cos(ph), y: Math.sin(th) * Math.sin(ph), z: Math.cos(th) };
+  } else {
+    const tanF = Math.tan(cam.fov * DEG / 2);
+    const aspect = w / Math.max(1, h);
+    d = { x: u * tanF * aspect, y: vUp * tanF, z: 1 };
+  }
+  const n = Math.hypot(d.x, d.y, d.z);
+  d = rotateDir({ x: d.x / n, y: d.y / n, z: d.z / n }, cam.yaw, cam.pitch);
+  return { lon: Math.atan2(d.x, d.z), lat: Math.asin(clamp(d.y, -1, 1)) };
+}
+
+// 世界方向 -> 屏幕坐标（CSS 像素），不可见返回 null
+function worldToScreen(lon, lat, cam) {
+  if (mode === 1 || mode === 2) return null;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  const d = unrotateDir(dirFromLonLat(lon, lat), cam.yaw, cam.pitch);
+  let u, vDn;
+  if (mode === 3) {
+    const th = Math.acos(clamp(d.z, -1, 1));
+    const r = th / (cam.fov * DEG / 2);
+    if (r > 1) return null;
+    const ph = Math.atan2(d.y, d.x);
+    u = r * Math.cos(ph); vDn = r * Math.sin(ph);
+  } else {
+    if (d.z <= 0.02) return null;
+    const tanF = Math.tan(cam.fov * DEG / 2);
+    const aspect = w / Math.max(1, h);
+    u = (d.x / d.z) / (tanF * aspect); vDn = -(d.y / d.z) / tanF;
+  }
+  const x = (u + 1) / 2 * w;
+  const y = (1 + vDn) / 2 * h;
+  if (x < -40 || x > w + 40 || y < -40 || y > h + 40) return null;   // 屏幕外不渲染标记
+  return { x, y };
+}
+
+function nearestAngle(from, to) {
+  let t = to;
+  while (t - from > Math.PI) t -= Math.PI * 2;
+  while (t - from < -Math.PI) t += Math.PI * 2;
+  return t;
+}
+
+function flyTo(lon, lat) {
+  target.yaw = nearestAngle(cur.yaw, lon);
+  target.pitch = -lat;      // 不夹紧：竖直方向可以一直转，越过天顶/天底不会卡住
+}
+
+// --- 尺寸 / 渲染 ------------------------------------------------------------
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+  const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+  return dpr;
+}
+window.addEventListener('resize', resize);
+resize();
+
+function drawScene(w, h, cam, opts) {
+  opts = opts || {};
+  const ox = opts.origin ? opts.origin[0] : 0;
+  const oy = opts.origin ? opts.origin[1] : 0;
+  gl.viewport(ox, oy, w, h);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(prog);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.uniform2f(uni.uRes, w, h);
+  gl.uniform2f(uni.uOrigin, ox, oy);
+  gl.uniform1f(uni.uYaw, cam.yaw);
+  gl.uniform1f(uni.uPitch, cam.pitch);
+  gl.uniform1f(uni.uFov, opts.fov != null ? opts.fov : cam.fov);
+  gl.uniform1f(uni.uZoom, cam.zoom);
+  gl.uniform1f(uni.uRoll, cam.roll || 0);
+  gl.uniform1f(uni.uGrid, opts.grid != null ? opts.grid : (gridOn ? 1 : 0));
+  gl.uniform1f(uni.uSeam, seamOn ? 1 : 0);
+  gl.uniform1i(uni.uMode, mode);
+  gl.uniform1i(uni.uTex, 0);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+function draw() {
+  const dpr = resize();
+  drawScene(canvas.width, canvas.height, cur);
+
+  // 放大镜：右下角 3 倍局部放大（视口原点必须传给着色器，否则只有左下角一块有效）
+  if (magOn) {
+    const size = Math.round(200 * dpr);
+    const m = Math.round(18 * dpr);
+    const x = canvas.width - size - m;
+    const y = Math.round(70 * dpr);
+    const cam = {
+      yaw: magYaw != null ? magYaw : cur.yaw,
+      pitch: magPitch != null ? magPitch : cur.pitch,
+      zoom: cur.zoom, fov: cur.fov, roll: cur.roll
+    };
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(x, y, size, size);
+    drawScene(size, size, cam, {
+      origin: [x, y],
+      fov: (mode === 1 || mode === 2) ? cam.fov : Math.max(LIMIT.fov[0], cam.fov / 3),
+      grid: 0
+    });
+    gl.disable(gl.SCISSOR_TEST);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+}
+
+// --- 覆盖层更新 -------------------------------------------------------------
+const spotLayer = document.getElementById('spotLayer');
+const huntLayer = document.getElementById('huntLayer');
+const hud = document.getElementById('hud');
+const toastEl = document.getElementById('toast');
+
+let toastTimer = 0;
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.add('on');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('on'), 1800);
+}
+
+let spots = [];
+try { spots = JSON.parse(localStorage.getItem('pano_spots_v1') || '[]'); } catch (e) { spots = []; }
+
+function saveSpots() {
+  try { localStorage.setItem('pano_spots_v1', JSON.stringify(spots)); } catch (e) {}
+}
+
+function renderSpots() {
+  spotLayer.innerHTML = '';
+  spots.forEach((s, i) => {
+    const el = document.createElement('div');
+    el.className = 'spot';
+    el.innerHTML = '<i></i><b></b>';
+    el.querySelector('b').textContent = s.label;
+    el.addEventListener('click', e => {
+      e.stopPropagation();
+      flyTo(s.lon, s.lat);
+      toast('已定位到：' + s.label);
+    });
+    el.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      spots.splice(i, 1);
+      saveSpots(); renderSpots();
+      toast('已删除热点');
+    });
+    spotLayer.appendChild(el);
+    s._el = el;
+  });
+}
+
+// --- 热点命名面板 -----------------------------------------------------------
+const spotDlg = document.getElementById('spotDlg');
+const spotInput = document.getElementById('spotInput');
+let pendingSpot = null;
+
+function openSpotDialog(w) {
+  pendingSpot = w;
+  spotInput.value = '位置 ' + Math.round(w.lon / DEG) + '°';
+  spotDlg.classList.add('on');
+  spotInput.focus();
+  spotInput.select();
+}
+
+function closeSpotDialog() {
+  spotDlg.classList.remove('on');
+  pendingSpot = null;
+  spotMode = false;
+  document.getElementById('btnSpot').classList.remove('on');
+}
+
+document.getElementById('spotOk').addEventListener('click', () => {
+  if (pendingSpot) {
+    const label = spotInput.value.trim() || '未命名';
+    spots.push({ lon: pendingSpot.lon, lat: pendingSpot.lat, label });
+    saveSpots(); renderSpots();
+    toast('热点已添加（右键可删除）');
+  }
+  closeSpotDialog();
+});
+
+document.getElementById('spotCancel').addEventListener('click', closeSpotDialog);
+spotInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('spotOk').click();
+  if (e.key === 'Escape') closeSpotDialog();
+});
+
+function updateOverlays() {
+  spots.forEach(s => {
+    const p = worldToScreen(s.lon, s.lat, cur);
+    if (!p || !s._el) { if (s._el) s._el.style.display = 'none'; return; }
+    s._el.style.display = 'flex';
+    s._el.style.left = p.x + 'px';
+    s._el.style.top = p.y + 'px';
+  });
+
+  huntTargets.forEach((t, i) => {
+    if (!t.el) return;
+    if (t.found) { t.el.classList.add('hide'); return; }
+    const p = worldToScreen(t.lon, t.lat, cur);
+    if (!p) { t.el.classList.add('hide'); return; }
+    t.el.classList.remove('hide');
+    t.el.style.left = p.x + 'px';
+    t.el.style.top = p.y + 'px';
+  });
+}
+
+// --- 寻宝游戏 ---------------------------------------------------------------
+let huntOn = false;
+let huntTargets = [];
+let huntTimer = 0, huntStart = 0, huntElapsed = 0;
+const HUNT_KEY = 'pano_hunt_best';
+const HUNT_COUNT = 3;
+
+function huntBest() {
+  return Number(localStorage.getItem(HUNT_KEY) || 0);
+}
+
+function startHunt() {
+  huntTargets.forEach(t => t.el && t.el.remove());
+  huntTargets = [];
+  for (let i = 0; i < HUNT_COUNT; i++) {
+    const lon = (Math.random() * 2 - 1) * Math.PI;
+    const lat = (Math.random() * 2 - 1) * 60 * DEG;
+    const el = document.createElement('div');
+    el.className = 'target hide';
+    huntLayer.appendChild(el);
+    huntTargets.push({ lon, lat, found: false, el });
+  }
+  huntOn = true;
+  huntStart = performance.now();
+  huntElapsed = 0;
+  hud.classList.add('on');
+  huntTimer = 0;
+  toast('寻宝开始：转动视角，点掉 3 个绿色星标');
+}
+
+function stopHunt() {
+  huntOn = false;
+  huntTargets.forEach(t => t.el && t.el.remove());
+  huntTargets = [];
+  hud.classList.remove('on');
+  document.getElementById('btnHunt').classList.remove('on');
+}
+
+function updateHud() {
+  if (!huntOn) return;
+  const s = huntElapsed / 1000;
+  const left = huntTargets.filter(t => !t.found).length;
+  hud.innerHTML = '寻宝中 · 用时 ' + s.toFixed(1) + 's<br>剩余 ' + left + ' / ' + HUNT_COUNT +
+    ' · 最佳 ' + (huntBest() ? huntBest().toFixed(1) + 's' : '—');
+}
+
+function checkHuntClick(x, y) {
+  for (const t of huntTargets) {
+    if (t.found) continue;
+    const p = worldToScreen(t.lon, t.lat, cur);
+    if (!p) continue;
+    if (Math.hypot(p.x - x, p.y - y) < 32) {
+      t.found = true;
+      t.el.classList.add('hide');
+      flyTo(t.lon, t.lat);
+      if (huntTargets.every(v => v.found)) {
+        stopHunt();
+        if (!huntBest() || huntElapsed / 1000 < huntBest()) {
+          localStorage.setItem(HUNT_KEY, String(huntElapsed / 1000));
+          toast('全部找到！用时 ' + (huntElapsed / 1000).toFixed(1) + 's，刷新最佳记录');
+        } else {
+          toast('全部找到！用时 ' + (huntElapsed / 1000).toFixed(1) + 's');
+        }
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+// --- 交互 -------------------------------------------------------------------
+let dragging = false, lx = 0, ly = 0;
+let downX = 0, downY = 0, downT = 0, moved = 0;
+let vYaw = 0, vPitch = 0;
+
+// 双指缩放（手机端没有滚轮）
+const pointers = new Map();
+let pinchDist = 0;
+
+function pairDist() {
+  const p = Array.from(pointers.values());
+  return Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
 }
 
 canvas.addEventListener('pointerdown', e => {
-  state.drag = true; state.lx = e.clientX; state.ly = e.clientY;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size >= 2) {
+    pinchDist = pairDist();
+    dragging = false;
+    canvas.classList.remove('dragging');
+    return;
+  }
+  dragging = true; lx = e.clientX; ly = e.clientY;
+  downX = e.clientX; downY = e.clientY; downT = performance.now();
+  moved = 0; vYaw = 0; vPitch = 0;
+  fling.yaw = 0; fling.pitch = 0;
   canvas.classList.add('dragging');
   canvas.setPointerCapture(e.pointerId);
 });
+
 canvas.addEventListener('pointermove', e => {
-  if (!state.drag) return;
-  const dx = (e.clientX - state.lx) / W;
-  const dy = (e.clientY - state.ly) / H;
-  state.lx = e.clientX; state.ly = e.clientY;
-  if (state.mode === 'planet' || state.mode === 'rabbit') {
-    state.yaw += dx * 2.5;
-  } else {
-    state.yaw -= dx * 2.5;
-    state.pitch = clamp(state.pitch + dy * 1.6, -1.35, 1.35);
+  if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+  if (pointers.size >= 2) {
+    const d = pairDist();
+    if (pinchDist > 0 && d > 0) {
+      const k = pinchDist / d;
+      if (mode === 1 || mode === 2) {
+        target.zoom = clamp(target.zoom * k, LIMIT.zoom[0], LIMIT.zoom[1]);
+      } else {
+        target.fov = clamp(target.fov * k, LIMIT.fov[0], LIMIT.fov[1]);
+      }
+    }
+    pinchDist = d;
+    return;
   }
-  state.dirty = true;
+
+  const rect = canvas.getBoundingClientRect();
+  if (magOn && !dragging) {
+    const w = screenToWorld(e.clientX - rect.left, e.clientY - rect.top, cur);
+    magYaw = w ? w.lon : null;
+    magPitch = w ? -w.lat : null;
+  }
+  if (!dragging) return;
+  const dx = (e.clientX - lx) / canvas.clientWidth;
+  const dy = (e.clientY - ly) / canvas.clientHeight;
+  lx = e.clientX; ly = e.clientY;
+  moved += Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY);
+  if (mode === 1 || mode === 2) {
+    target.yaw += dx * 2.5;
+    vYaw = dx * 2.5 * 60;      // 约按 60Hz 采样估算角速度
+  } else {
+    // 拖拽比例按当前视场角换算，透视模式还要考虑宽高比（竖屏时横向角跨度更大）
+    const aspect = canvas.clientWidth / Math.max(1, canvas.clientHeight);
+    const vSpan = cur.fov * DEG;
+    const hSpan = (mode === 3) ? vSpan
+      : 2 * Math.atan(Math.tan(cur.fov * DEG / 2) * aspect);
+    // 拖动方向 = 视角转动方向（左右、上下都不再反向）
+    target.yaw += dx * hSpan;
+    target.pitch += dy * vSpan;   // 不夹紧，竖直方向可连续转 360°
+    vYaw = dx * hSpan * 60;
+    vPitch = dy * vSpan * 60;
+  }
 });
-canvas.addEventListener('pointerup', () => {
-  state.drag = false; canvas.classList.remove('dragging');
+
+function endDrag(e) {
+  pointers.delete(e.pointerId);
+  pinchDist = 0;
+  if (!dragging) return;
+  dragging = false;
+  canvas.classList.remove('dragging');
+  const dt = performance.now() - downT;
+  const isClick = moved < 8 && dt < 500 && pointers.size === 0;
+  if (isClick) {
+    handleClick(e.clientX, e.clientY);
+  } else if (!isClick) {
+    fling.yaw = clamp(vYaw, -30, 30);
+    fling.pitch = clamp(vPitch, -20, 20);
+  }
+}
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', e => {
+  pointers.delete(e.pointerId);
+  pinchDist = 0;
+  dragging = false;
+  canvas.classList.remove('dragging');
 });
+
+function handleClick(sx, sy) {
+  const rect = canvas.getBoundingClientRect();
+  const x = sx - rect.left, y = sy - rect.top;
+
+  if (huntOn && checkHuntClick(x, y)) return;
+
+  const w = screenToWorld(x, y, cur);
+  if (!w) return;
+
+  if (spotMode) openSpotDialog(w);
+}
+
 canvas.addEventListener('wheel', e => {
   e.preventDefault();
-  if (state.mode === 'planet' || state.mode === 'rabbit') {
-    state.zoom = clamp(state.zoom * (1 + e.deltaY * 0.001), 0.25, 4);
+  if (mode === 1 || mode === 2) {
+    target.zoom = clamp(target.zoom * (1 + e.deltaY * 0.001), LIMIT.zoom[0], LIMIT.zoom[1]);
   } else {
-    state.fov = clamp(state.fov + e.deltaY * 0.08, 20, 220);
+    target.fov = clamp(target.fov + e.deltaY * 0.08, LIMIT.fov[0], LIMIT.fov[1]);
   }
-  state.dirty = true;
 }, { passive: false });
+
 canvas.addEventListener('dblclick', () => {
-  state.yaw = 0; state.pitch = 0; state.fov = 100; state.zoom = 1; state.dirty = true;
+  target.yaw = DEFAULT.yaw;
+  target.pitch = DEFAULT.pitch;
+  target.fov = DEFAULT.fov;
+  target.zoom = DEFAULT.zoom;
 });
 
 document.querySelectorAll('.bar button').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.bar button').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    state.mode = btn.dataset.mode;
-    state.dirty = true;
+    mode = Number(btn.dataset.mode);
   });
 });
+
+// --- 陀螺仪 -----------------------------------------------------------------
+function onOrientation(e) {
+  if (!gyroOn || dragging) return;
+  if (e.alpha == null || e.beta == null) return;
+  target.yaw = -e.alpha * DEG;
+  target.pitch = (e.beta - 90) * DEG;
+}
+
+function toggleGyro() {
+  const btn = document.getElementById('btnGyro');
+  if (HOST) {
+    gyroOn = !gyroOn;
+    HOST.setGyro(gyroOn);
+    btn.classList.toggle('on', gyroOn);
+    toast(gyroOn ? '手机陀螺仪已开启，转动手机看四周' : '手机陀螺仪已关闭');
+    return;
+  }
+  if (gyroOn) {
+    gyroOn = false;
+    window.removeEventListener('deviceorientation', onOrientation);
+    btn.classList.remove('on');
+    toast('陀螺仪已关闭');
+    return;
+  }
+  if (typeof DeviceOrientationEvent === 'undefined') { toast('当前设备不支持陀螺仪'); return; }
+  const enable = () => {
+    gyroOn = true;
+    window.addEventListener('deviceorientation', onOrientation);
+    btn.classList.add('on');
+    toast('陀螺仪已开启，转动手机即可看四周');
+  };
+  if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+    DeviceOrientationEvent.requestPermission().then(r => {
+      if (r === 'granted') enable();
+      else toast('陀螺仪权限被拒绝');
+    }).catch(() => toast('陀螺仪权限申请失败'));
+  } else {
+    enable();
+  }
+}
+
+// --- 工具栏 -----------------------------------------------------------------
+const btnHunt = document.getElementById('btnHunt');
+const btnMag = document.getElementById('btnMag');
+const btnGrid = document.getElementById('btnGrid');
+const btnCompare = document.getElementById('btnCompare');
+const btnSpot = document.getElementById('btnSpot');
+const btnLink = document.getElementById('btnLink');
+const btnPoster = document.getElementById('btnPoster');
+const magEl = document.getElementById('mag');
+const compareEl = document.getElementById('compare');
+const rawImg = document.getElementById('rawImg');
+
+document.getElementById('btnGyro').addEventListener('click', toggleGyro);
+
+btnHunt.addEventListener('click', () => {
+  if (huntOn) {
+    stopHunt();
+    btnHunt.classList.remove('on');
+  } else {
+    startHunt();
+    btnHunt.classList.add('on');
+  }
+});
+btnMag.addEventListener('click', () => {
+  magOn = !magOn;
+  btnMag.classList.toggle('on', magOn);
+  magEl.classList.toggle('on', magOn);
+  magYaw = magPitch = null;
+});
+canvas.addEventListener('pointerleave', () => { magYaw = magPitch = null; });
+
+btnGrid.addEventListener('click', () => {
+  gridOn = !gridOn;
+  btnGrid.classList.toggle('on', gridOn);
+});
+
+const btnSeam = document.getElementById('btnSeam');
+btnSeam.addEventListener('click', () => {
+  seamOn = !seamOn;
+  btnSeam.classList.toggle('on', seamOn);
+  toast(seamOn ? '蓝色区域即两镜头融合带（±10°）' : '已关闭拼接缝标记');
+});
+
+btnCompare.addEventListener('click', () => {
+  compareOn = !compareOn;
+  btnCompare.classList.toggle('on', compareOn);
+  compareEl.classList.toggle('on', compareOn);
+  if (compareOn) {
+    if (HOST) {
+      rawImg.removeAttribute('src');
+      HOST.requestRaw();
+    } else if (!rawImg.getAttribute('src')) {
+      rawImg.src = 'raw.jpg';
+      rawImg.onerror = () => toast('raw.jpg 未提供，请用 pano_demo.py 启动');
+    }
+  }
+});
+
+btnSpot.addEventListener('click', () => {
+  if (mode === 1 || mode === 2) { toast('小行星/兔子洞模式下无法添加热点'); return; }
+  spotMode = !spotMode;
+  btnSpot.classList.toggle('on', spotMode);
+  if (spotMode) toast('点击画面任意位置添加热点');
+});
+
+btnLink.addEventListener('click', async () => {
+  const u = new URL(location.href);
+  u.searchParams.set('mode', String(mode));
+  u.searchParams.set('yaw', cur.yaw.toFixed(3));
+  u.searchParams.set('pitch', cur.pitch.toFixed(3));
+  u.searchParams.set('fov', cur.fov.toFixed(1));
+  u.searchParams.set('zoom', cur.zoom.toFixed(3));
+  const link = u.toString();
+  if (HOST && HOST.copyText) {
+    HOST.copyText(link);
+    toast('视角链接已复制');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(link);
+    toast('视角链接已复制');
+  } catch (e) {
+    toast('复制失败，链接已打印到控制台');
+    console.log(link);
+  }
+});
+
+btnPoster.addEventListener('click', exportPoster);
+
+// 对比分割线拖动
+const cmpHandle = document.getElementById('cmpHandle');
+let cmpDrag = false;
+cmpHandle.addEventListener('pointerdown', e => {
+  cmpDrag = true;
+  cmpHandle.setPointerCapture(e.pointerId);
+});
+cmpHandle.addEventListener('pointermove', e => {
+  if (!cmpDrag) return;
+  const pct = clamp(e.clientX / window.innerWidth * 100, 5, 95);
+  compareEl.style.setProperty('--split', pct + '%');
+});
+cmpHandle.addEventListener('pointerup', () => { cmpDrag = false; });
+
+// --- 海报导出 ---------------------------------------------------------------
+async function exportPoster() {
+  if (!ready) { toast('贴图尚未就绪'); return; }
+  const W = 1920, H = 1080;
+  const oldW = canvas.width, oldH = canvas.height;
+  canvas.width = W; canvas.height = H;
+  drawScene(W, H, cur, { grid: gridOn ? 1 : 0 });
+
+  const shot = document.createElement('canvas');
+  shot.width = W; shot.height = H;
+  const g = shot.getContext('2d');
+  g.drawImage(canvas, 0, 0, W, H);
+
+  // 水印
+  const label = ['360° 全景', '小行星', '兔子洞', '鱼眼'][mode] || '';
+  g.font = '700 56px "Microsoft YaHei", sans-serif';
+  g.fillStyle = 'rgba(255,255,255,.92)';
+  g.fillText('全景相机 · ' + label, 64, H - 64);
+  g.font = '400 26px "Microsoft YaHei", sans-serif';
+  g.fillStyle = 'rgba(255,255,255,.6)';
+  g.fillText('全景相机 · ' + new Date().toLocaleDateString(),
+    64, H - 24);
+
+  canvas.width = oldW; canvas.height = oldH;
+  resize();
+
+  if (HOST) {
+    HOST.savePoster(shot.toDataURL('image/png'));
+    toast('海报已保存到手机');
+    return;
+  }
+
+  shot.toBlob(b => {
+    if (!b) { toast('海报生成失败'); return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(b);
+    a.download = 'pano-poster-' + Date.now() + '.png';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    toast('海报已导出（1920×1080）');
+  }, 'image/png');
+}
+
+// --- 录制 / 拍照 -------------------------------------------------------------
+const recHud = document.getElementById('recHud');
+const recTimeEl = document.getElementById('recTime');
+const btnRec = document.getElementById('btnRec');
+const btnShot = document.getElementById('btnShot');
+let recOn = false;
+let recStartAt = 0;
+let webRecorder = null;
+let recChunks = [];
+
+function setRecUi(on) {
+  recOn = on;
+  btnRec.classList.toggle('on', on);
+  recHud.classList.toggle('on', on);
+  if (on) {
+    recStartAt = performance.now();
+    recTimeEl.textContent = 'REC 00:00';
+  }
+}
+
+function updateRecUi() {
+  if (!recOn) return;
+  const s = Math.max(0, (performance.now() - recStartAt) / 1000);
+  const mm = String(Math.floor(s / 60)).padStart(2, '0');
+  const ss = String(Math.floor(s % 60)).padStart(2, '0');
+  recTimeEl.textContent = 'REC ' + mm + ':' + ss;
+}
+
+// App 端录制交给原生编码拼接后的 2:1 原图；这里只发请求，状态由 panoOnEvent 回推
+function toggleRecord() {
+  if (HOST && HOST.toggleRecord) {
+    HOST.toggleRecord();
+    return;
+  }
+  if (recOn) {
+    stopWebRecord();
+  } else {
+    startWebRecord();
+  }
+}
+
+function pickRecMime() {
+  const list = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  for (const m of list) {
+    if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(m)) return m;
+  }
+  return '';
+}
+
+// 网页端录制的是拼接后的 2:1 等距原图（不是当前视角截图）
+let eqCanvas = null, eqCtx = null, eqTimer = 0;
+
+function drawEquirectFrame() {
+  const w = img.naturalWidth, h = img.naturalHeight;
+  if (!w || !h) return false;
+  if (!eqCanvas) {
+    eqCanvas = document.createElement('canvas');
+    eqCtx = eqCanvas.getContext('2d');
+  }
+  if (eqCanvas.width !== w || eqCanvas.height !== h) {
+    eqCanvas.width = w; eqCanvas.height = h;
+  }
+  eqCtx.drawImage(img, 0, 0, w, h);
+  return true;
+}
+
+function startWebRecord() {
+  if (!drawEquirectFrame() || !eqCanvas.captureStream) {
+    toast('当前浏览器不支持录制全景原图');
+    return;
+  }
+  let stream, mime = pickRecMime();
+  try {
+    stream = eqCanvas.captureStream(30);
+    webRecorder = new MediaRecorder(stream,
+      mime ? { mimeType: mime, videoBitsPerSecond: 6000000 } : undefined);
+  } catch (e) {
+    toast('录制初始化失败：' + e);
+    webRecorder = null;
+    return;
+  }
+  recChunks = [];
+  webRecorder.ondataavailable = e => { if (e.data && e.data.size) recChunks.push(e.data); };
+  webRecorder.onstop = () => {
+    const type = recChunks.length ? recChunks[0].type : 'video/webm';
+    const blob = new Blob(recChunks, { type });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'pano-' + new Date().toISOString().replace(/[:.]/g, '-') + '.webm';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+    toast('全景视频已导出（' + (blob.size / 1048576).toFixed(1) + ' MB）');
+  };
+  // 静态图也要持续出帧，否则画面只有一帧
+  eqTimer = setInterval(() => drawEquirectFrame(), 33);
+  webRecorder.start(1000);
+  setRecUi(true);
+  toast('开始录屏（拼接原图 2:1）');
+}
+
+function stopWebRecord() {
+  if (eqTimer) { clearInterval(eqTimer); eqTimer = 0; }
+  if (webRecorder && webRecorder.state !== 'inactive') webRecorder.stop();
+  webRecorder = null;
+  setRecUi(false);
+}
+
+function shutterFlash() {
+  const f = document.getElementById('flash');
+  f.classList.add('on');
+  setTimeout(() => f.classList.remove('on'), 40);
+}
+
+// 保存拼接后的 2:1 等距原图（网页下载，App 交给原生存相册）
+function takePhoto() {
+  if (HOST && HOST.capturePhoto) {
+    HOST.capturePhoto();
+    return;
+  }
+  if (!img.complete || !img.naturalWidth) { toast('画面尚未就绪'); return; }
+  const w = img.naturalWidth, h = img.naturalHeight;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d').drawImage(img, 0, 0, w, h);
+  shutterFlash();
+  c.toBlob(b => {
+    if (!b) { toast('拍照失败'); return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(b);
+    a.download = 'pano-equirect-' + Date.now() + '.png';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+    toast('已导出 2:1 拼接原图');
+  }, 'image/png');
+}
+
+// App 端手势/录制状态由原生主动推过来
+window.panoOnEvent = function (name, msg) {
+  if (name === 'rec-start') {
+    setRecUi(true);
+    toast('开始录制全景原图');
+  } else if (name === 'rec-stop') {
+    setRecUi(false);
+    if (msg) toast(msg);
+  } else if (name === 'shutter') {
+    shutterFlash();          // 原图由原生保存，这里只给快门反馈
+  } else if (name === 'fps' && msg) {
+    const el = document.getElementById('fpsHud');
+    el.textContent = msg;    // 例：18.2 fps · 54 ms
+    el.classList.add('on');
+  } else if (name === 'toast' && msg) {
+    toast(msg);
+  }
+};
+
+btnRec.addEventListener('click', toggleRecord);
+btnShot.addEventListener('click', takePhoto);
+
+// --- 深链接 ----------------------------------------------------------------
+(function applyDeepLink() {
+  const p = new URLSearchParams(location.search);
+  const num = (k, d) => {
+    const raw = p.get(k);
+    if (raw == null || raw === '') return d;
+    const v = Number(raw);
+    return Number.isFinite(v) ? v : d;
+  };
+  if (p.has('mode')) {
+    mode = clamp(Math.round(num('mode', 0)), 0, 3);
+    document.querySelectorAll('.bar button').forEach(b => {
+      b.classList.toggle('active', Number(b.dataset.mode) === mode);
+    });
+  }
+  target.yaw = cur.yaw = num('yaw', target.yaw);
+  target.pitch = cur.pitch = num('pitch', target.pitch);
+  target.fov = cur.fov = clamp(num('fov', target.fov), LIMIT.fov[0], LIMIT.fov[1]);
+  target.zoom = cur.zoom = clamp(num('zoom', target.zoom), LIMIT.zoom[0], LIMIT.zoom[1]);
+})();
+
+// --- App 宿主轮询（WebView 内只有这一处与网页端不同） ------------------------
+let lastHostPoll = 0;
+
+function pollHost(now) {
+  if (!HOST || now - lastHostPoll < 55) return;
+  lastHostPoll = now;
+
+  const frame = HOST.pollFrame();
+  if (frame && frame.length) img.src = frame;      // img.onload 统一走 uploadTexture
+
+  const raw = HOST.pollRaw();
+  if (raw && raw.length) rawImg.src = raw;
+
+  const g = HOST.pollGyro();
+  if (g && g.length) {
+    const parts = g.split(',');
+    const dy = Number(parts[0]);
+    const dp = Number(parts[1]);
+    const rl = Number(parts[2]);
+    if (!dragging && Number.isFinite(dy) && Number.isFinite(dp)) {
+      target.yaw += dy * DEG;
+      target.pitch += dp * DEG;
+    }
+    if (Number.isFinite(rl)) rollTarget = rl * DEG;   // 重力水平补偿
+  }
+}
+
+// --- 主循环 -----------------------------------------------------------------
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.1);
+  last = now;
+
+  pollHost(now);
+
+  // 惯性滑行
+  if (!dragging && (Math.abs(fling.yaw) > 0.01 || Math.abs(fling.pitch) > 0.01)) {
+    target.yaw += fling.yaw * dt;
+    if (mode === 0 || mode === 3) {
+      target.pitch += fling.pitch * dt;
+    }
+    const decay = Math.exp(-dt * 3.2);
+    fling.yaw *= decay; fling.pitch *= decay;
+  }
+
+  const k = 1 - Math.exp(-dt / SMOOTH_TAU);
+  cur.yaw += (target.yaw - cur.yaw) * k;
+  cur.pitch += (target.pitch - cur.pitch) * k;
+  cur.fov += (target.fov - cur.fov) * k;
+  cur.zoom += (target.zoom - cur.zoom) * k;
+  cur.roll += (rollTarget - cur.roll) * k;
+
+  if (huntOn) { huntElapsed = performance.now() - huntStart; updateHud(); }
+  updateRecUi();
+  updateOverlays();
+  if (ready) draw();
+  requestAnimationFrame(frame);
+}
+
+renderSpots();
+requestAnimationFrame(frame);
 </script>
 </body>
 </html>

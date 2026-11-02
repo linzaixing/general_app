@@ -6,7 +6,10 @@
     <uses-feature android:name="android.hardware.sensor.gyroscope" android:required="false" />
     <application
         android:label="PanoCam"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/Theme.AppCompat.NoActionBar"
+        android:largeHeap="true"
         android:hardwareAccelerated="true">
         <activity
             android:name=".MainActivity"

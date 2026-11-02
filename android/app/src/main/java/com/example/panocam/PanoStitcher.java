@@ -1,7 +1,7 @@
 package com.example.panocam;
 
 /**
- * Insta360 Air 双鱼眼拼接与全景投影（纯 Java 移植自 PC 端 stitch_air.py）。
+ * 全景相机双鱼眼拼接与全景投影（纯 Java 移植自 PC 端 stitch_fisheye.py）。
  * 参数直接使用原 App 的 offset，不重新标定。
  */
 public final class PanoStitcher {
@@ -176,6 +176,184 @@ public final class PanoStitcher {
 
     private static float clampf(float v, float min, float max) {
         return v < min ? min : (v > max ? max : v);
+    }
+
+    // ------------------------------------------------------------------
+    // 快速拼接：采样坐标与融合权重只和「分辨率 + 镜头参数」有关，与画面内容无关，
+    // 因此预计算成表后每帧只做双线性采样 + 混合；再按行拆到多核并行。
+    // ------------------------------------------------------------------
+
+    private static final int WORKERS = Math.max(1,
+            Math.min(4, Runtime.getRuntime().availableProcessors() - 1));
+
+    private static final java.util.concurrent.ExecutorService POOL =
+            java.util.concurrent.Executors.newFixedThreadPool(WORKERS, r -> {
+                Thread t = new Thread(r, "stitch");
+                t.setDaemon(true);
+                return t;
+            });
+
+    private static EquirectLut lutCache;
+
+    private static synchronized EquirectLut lutFor(int fw, int fh, int ow, int oh) {
+        EquirectLut l = lutCache;
+        if (l != null && l.fw == fw && l.fh == fh && l.ow == ow && l.oh == oh) {
+            return l;
+        }
+        l = new EquirectLut(fw, fh, ow, oh);
+        lutCache = l;
+        return l;
+    }
+
+    /** 预计算的采样表（每种输出尺寸一份，缓存复用）。 */
+    private static final class EquirectLut {
+        final int fw, fh, ow, oh, half, fwHalfW;
+        final float[] ul, vl, ur, vr, blend;
+        /** 越界时的兜底坐标（等价于旧实现「退回圆内」的第二次采样）。 */
+        final float[] ul2, vl2, ur2, vr2;
+
+        EquirectLut(int fw, int fh, int ow, int oh) {
+            this.fw = fw;
+            this.fh = fh;
+            this.ow = ow;
+            this.oh = oh;
+            this.half = fw / 2;
+            this.fwHalfW = fw - half;
+
+            float[][] lens = parseLenses(fw);
+            float halfFov = (float) Math.toRadians(FOV_DEG / 2.0);
+            float blend = (float) Math.toRadians(BLEND_DEG);
+            float cx0 = lens[0][0], cy0 = lens[0][1], r0 = lens[0][2];
+            float roll0 = (float) Math.toRadians(lens[0][3]);
+            float cx1 = lens[1][0], cy1 = lens[1][1], r1 = lens[1][2];
+            float roll1 = (float) Math.toRadians(lens[1][3]);
+
+            int n = ow * oh;
+            ul = new float[n];
+            vl = new float[n];
+            ur = new float[n];
+            vr = new float[n];
+            ul2 = new float[n];
+            vl2 = new float[n];
+            ur2 = new float[n];
+            vr2 = new float[n];
+            this.blend = new float[n];
+
+            for (int y = 0; y < oh; y++) {
+                double lat = Math.PI / 2.0 - Math.PI * y / (oh - 1);
+                float clat = (float) Math.cos(lat);
+                float slat = (float) Math.sin(lat);
+                int row = y * ow;
+                for (int x = 0; x < ow; x++) {
+                    double lon = -Math.PI + 2.0 * Math.PI * x / ow;
+                    float rx = clat * (float) Math.sin(lon);
+                    float rz = clat * (float) Math.cos(lon);
+                    int i = row + x;
+
+                    // 后镜头 P_BACK = diag(1, 1, -1)
+                    float th = (float) Math.acos(clampf(-rz, -1f, 1f));
+                    float phi = (float) Math.atan2(slat, rx) + roll0;
+                    float rr = r0 * th / halfFov;
+                    float cp = (float) Math.cos(phi);
+                    float sp = (float) Math.sin(phi);
+                    ul[i] = cx0 + rr * cp;
+                    vl[i] = cy0 + rr * sp;
+                    float rr2 = Math.min(rr, r0 * 0.99f);
+                    ul2[i] = cx0 + rr2 * cp;
+                    vl2[i] = cy0 + rr2 * sp;
+
+                    // 前镜头 P_FRONT = diag(1, -1, 1)
+                    th = (float) Math.acos(clampf(rz, -1f, 1f));
+                    phi = (float) Math.atan2(-slat, rx) + roll1;
+                    rr = r1 * th / halfFov;
+                    cp = (float) Math.cos(phi);
+                    sp = (float) Math.sin(phi);
+                    ur[i] = cx1 + rr * cp;
+                    vr[i] = cy1 + rr * sp;
+                    rr2 = Math.min(rr, r1 * 0.99f);
+                    ur2[i] = cx1 + rr2 * cp;
+                    vr2[i] = cy1 + rr2 * sp;
+
+                    this.blend[i] = clampf((-rz + blend) / (2f * blend), 0f, 1f);
+                }
+            }
+        }
+    }
+
+    /**
+     * 与 stitchEquirect 等效，但用采样表 + 多线程；reusable 传入上一帧的 out 可避免重复分配。
+     */
+    public static int[] stitchEquirectFast(int[] frame, int fw, int fh, int ow, int oh,
+                                           int[] reusable) {
+        if (frame == null || frame.length < fw * fh) {
+            return null;
+        }
+        EquirectLut lut = lutFor(fw, fh, ow, oh);
+        int[] out = (reusable != null && reusable.length == ow * oh)
+                ? reusable : new int[ow * oh];
+
+        int threads = WORKERS;
+        if (threads <= 1 || oh < 64) {
+            stitchRows(lut, frame, out, 0, oh);
+            return out;
+        }
+        int chunk = (oh + threads - 1) / threads;
+        java.util.List<java.util.concurrent.Future<?>> pending =
+                new java.util.ArrayList<>(threads - 1);
+        for (int i = 1; i < threads; i++) {
+            final int y0 = i * chunk;
+            final int y1 = Math.min(oh, y0 + chunk);
+            if (y0 >= y1) {
+                break;
+            }
+            pending.add(POOL.submit(() -> stitchRows(lut, frame, out, y0, y1)));
+        }
+        stitchRows(lut, frame, out, 0, Math.min(chunk, oh));
+        for (java.util.concurrent.Future<?> f : pending) {
+            try {
+                f.get();
+            } catch (Exception ignored) {
+            }
+        }
+        return out;
+    }
+
+    private static void stitchRows(EquirectLut lut, int[] frame, int[] out, int yStart, int yEnd) {
+        int ow = lut.ow;
+        int stride = lut.fw;
+        int fh = lut.fh;
+        int half = lut.half;
+        int fwHalfW = lut.fwHalfW;
+        float[] ul = lut.ul, vl = lut.vl, ur = lut.ur, vr = lut.vr, bl = lut.blend;
+        float[] ul2 = lut.ul2, vl2 = lut.vl2, ur2 = lut.ur2, vr2 = lut.vr2;
+        float maxUL = half - 1f;
+        float maxUR = fwHalfW - 1f;
+        float maxV = fh - 1f;
+        for (int y = yStart; y < yEnd; y++) {
+            int row = y * ow;
+            for (int x = 0; x < ow; x++) {
+                int i = row + x;
+
+                float u = ul[i], v = vl[i];
+                int cL;
+                if (u < 0f || v < 0f || u > maxUL || v > maxV) {
+                    cL = sample(frame, stride, half, fh, ul2[i], vl2[i], 0);
+                } else {
+                    cL = sample(frame, stride, half, fh, u, v, 0);
+                }
+
+                u = ur[i];
+                v = vr[i];
+                int cR;
+                if (u < 0f || v < 0f || u > maxUR || v > maxV) {
+                    cR = sample(frame, stride, fwHalfW, fh, ur2[i], vr2[i], half);
+                } else {
+                    cR = sample(frame, stride, fwHalfW, fh, u, v, half);
+                }
+
+                out[i] = mix(cL, cR, bl[i]);
+            }
+        }
     }
 
     private static int mix(int cA, int cB, float wA) {

@@ -119,7 +119,7 @@ public class MainActivity extends CameraActivity implements SensorEventListener 
         status.setBackgroundColor(0x99000000);
         status.setPadding(24, 16, 24, 16);
         status.setTextSize(13);
-        status.setText("等待 Insta360 Air...\n陀螺仪: --");
+        status.setText("等待 全景相机...\n陀螺仪: --");
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
         root.addView(status, lp);
