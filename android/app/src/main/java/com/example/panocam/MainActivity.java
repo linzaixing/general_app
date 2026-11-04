@@ -71,18 +71,18 @@ import org.json.JSONObject;
  */
 public class MainActivity extends AppCompatActivity implements SensorEventListener {
 
-    /** 常见 UVC 输出尺寸；优先挑最高分辨率，预览拼接会降采样，录制/拍照用原生分辨率。 */
+    /** 常见 UVC 输出尺寸；画质优先取 3008×1504（拼接光学上限 ≈2784×1392）。 */
     private static final int[][] CANDIDATES = {
-            {2560, 1280}, {1920, 960}, {1280, 640}, {1280, 720}, {640, 480}, {3008, 1504}
+            {3008, 1504}, {2176, 1088}, {1472, 736}, {1280, 640}, {1280, 720}, {640, 480}
     };
     /** 预览拼接宽度/保存分辨率由页面「画质」选项下发，这里只是默认值。 */
-    private static final int PREVIEW_OUT_W = 1024;
-    private static final int SAVE_OUT_W = 2048;
+    private static final int PREVIEW_OUT_W = 1536;
+    private static final int SAVE_OUT_W = 2784;
     /** 预览回读尺寸（2:1，与双鱼眼画面一致）。 */
     private static final int CAPTURE_W = 1280;
     private static final int CAPTURE_H = 640;
     /** 录制/拍照原图的采集上限（源宽），输出宽度由页面选择的保存分辨率决定。 */
-    private static final int HI_SRC_MAX_W = 2560;
+    private static final int HI_SRC_MAX_W = 3008;
     private static final int VIEW_W = 640;
     private static final int VIEW_H = 360;
     private static final int PLANET_SIZE = 512;
@@ -105,13 +105,12 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     private FrameLayout root;
     private FrameLayout cameraContainer;
-    private AspectTextureView cameraView;
+    private GlPreview cameraView;
     private TextView status;
     private TextView hint;
     private LinearLayout controls;
     private WebView web;
     private Button stitchBtn;
-    private Button closeBtn;
     private final PanoHostBridge bridge = new PanoHostBridge();
     private boolean webLoaded;
 
@@ -171,6 +170,8 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private int[] captureBufHi;
     private int[] stitchBuf;
     private int[] stitchBufHi;
+    private int[] photoBuf;
+    private int recPreviewTick;      // CPU 兜底录制时控制预览推送频率（每 2 帧推一次）
     private int eqW, eqH;
     /** 页面「画质」选择：预览拼接宽度、保存原图宽度（均为 2:1 的宽）。 */
     private volatile int previewOutW = PREVIEW_OUT_W;
@@ -180,7 +181,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private int viewMode = PanoStitcher.MODE_PERSPECTIVE;
     private float viewFov = 110f;
     private Bitmap renderBitmap;
-    private boolean stitching;
     private long lastRenderAt;
 
     private String usbText = "USB: 未检测到";
@@ -203,27 +203,34 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         setContentView(buildRoot());
         ensureCameraPermission();
 
-        cameraView.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
+        cameraView.setListener(new GlPreview.Listener() {
             @Override
-            public void onSurfaceTextureAvailable(SurfaceTexture st, int w, int h) {
+            public void onCameraTexture(SurfaceTexture st) {
                 surfaceTexture = st;
                 tryOpenCamera();
             }
 
             @Override
-            public void onSurfaceTextureSizeChanged(SurfaceTexture st, int w, int h) {
-            }
-
-            @Override
-            public boolean onSurfaceTextureDestroyed(SurfaceTexture st) {
+            public void onCameraLost() {
                 surfaceTexture = null;
                 previewing = false;
                 camExec.execute(MainActivity.this::closeCameraSync);
-                return true;
             }
 
             @Override
-            public void onSurfaceTextureUpdated(SurfaceTexture st) {
+            public void onPreviewFrame(int[] eq, int ow, int oh) {
+                handleGlPreview(eq, ow, oh);
+            }
+
+            @Override
+            public void onPhotoFrame(int[] eq, int ow, int oh) {
+                saveEquirectPhoto(eq, ow, oh);
+            }
+
+            @Override
+            public void onGlError(String msg) {
+                errText = msg;
+                ui.post(MainActivity.this::updateStatus);
             }
         });
 
@@ -246,6 +253,17 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         }
 
         ui.postDelayed(watchdog, 1500);
+        // 摸底用的设备/参数快照，和每 5 秒的聚合日志一起看
+        try {
+            android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+            String abi = Build.SUPPORTED_ABIS.length > 0 ? Build.SUPPORTED_ABIS[0] : "?";
+            Perf.logConfig(String.format(Locale.US,
+                    "dev=%s hw=%s abi=%s sdk=%d screen=%dx%d preview=%dx%d cap=%dx%d save=%d stab=%s",
+                    Build.MODEL, Build.HARDWARE, abi, Build.VERSION.SDK_INT,
+                    dm.widthPixels, dm.heightPixels,
+                    previewOutW, previewOutW / 2, CAPTURE_W, CAPTURE_H, saveOutW, stabilize));
+        } catch (Throwable ignored) {
+        }
         updateStatus();
     }
 
@@ -644,12 +662,25 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             cam.open(cb);
             List<Size> sizes = cam.getSupportedSizeList();
             StringBuilder sb = new StringBuilder("可选尺寸:");
+            StringBuilder fpsSb = new StringBuilder("uvc sizes:");
             if (sizes != null) {
                 for (Size s : sizes) {
                     sb.append(' ').append(s.width).append('x').append(s.height);
+                    fpsSb.append(' ').append(s.width).append('x').append(s.height).append('@');
+                    if (s.fps != null && s.fps.length > 0) {
+                        for (int i = 0; i < s.fps.length; i++) {
+                            if (i > 0) {
+                                fpsSb.append('/');
+                            }
+                            fpsSb.append(String.format(Locale.US, "%.0f", s.fps[i]));
+                        }
+                    } else {
+                        fpsSb.append('?');
+                    }
                 }
             }
             sizeInfo = sb.toString();
+            Perf.logConfig(fpsSb.toString());   // 摸底：相机支持的分辨率与帧率
 
             int[] wh = pickSize(sizes);
             int w = wh[0];
@@ -661,11 +692,24 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             }
             cam.setPreviewTexture(st);
             cam.startPreview();
+            try {
+                Size cur = cam.getPreviewSize();
+                float curFps = 0f;
+                try {
+                    curFps = cur != null ? cur.getCurrentFrameRate() : 0f;
+                } catch (Throwable ignored) {
+                }
+                Perf.logConfig(String.format(Locale.US, "uvc chosen=%dx%d fps=%.1f",
+                        cur != null ? cur.width : w, cur != null ? cur.height : h, curFps));
+            } catch (Throwable ignored) {
+            }
 
             uvcCamera = cam;
             previewing = true;
             previewW = w;
             previewH = h;
+            cameraView.setCameraSize(w, h);
+            cameraView.setSizes(previewOutW);
             ui.post(() -> {
                 if (cameraView != null) {
                     cameraView.setAspect(w, h);
@@ -699,7 +743,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             }
             Size best = null;
             for (Size s : sizes) {
-                if (s.width > s.height && s.width <= 2560
+                if (s.width > s.height && s.width <= 3008
                         && Math.abs((float) s.width / s.height - 2f) < 0.03f) {
                     if (best == null || s.width > best.width) {
                         best = s;
@@ -784,7 +828,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         root.addView(cameraContainer, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        cameraView = new AspectTextureView(this);
+        cameraView = new GlPreview(this);
         cameraContainer.addView(cameraView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER));
         cameraView.setAspect(2, 1);
@@ -837,21 +881,10 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         root.addView(web, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        closeBtn = makeButton("退出全景");
-        FrameLayout.LayoutParams closeLp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP | Gravity.END);
-        closeLp.topMargin = 24;
-        closeLp.rightMargin = 24;
-        closeBtn.setVisibility(View.GONE);
-        root.addView(closeBtn, closeLp);
-
         // web 是后加的，会盖住状态栏和按钮；把它们提到最上层，保证全景查看时仍可点。
         status.bringToFront();
         controls.bringToFront();
-        closeBtn.bringToFront();
 
-        closeBtn.setOnClickListener(v -> closeViewer());
         stitchBtn.setOnClickListener(v -> doStitch());
 
         return root;
@@ -898,6 +931,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         private volatile boolean gyroEnabled;
         private volatile boolean frameConsumed = true;
         private volatile long pushedAt;
+        private volatile long pushedAtNano;
         private volatile float roll;
 
         void setRoll(float deg) {
@@ -908,6 +942,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             frameUrl = url;
             frameConsumed = false;
             pushedAt = System.currentTimeMillis();
+            pushedAtNano = System.nanoTime();
         }
 
         /**
@@ -920,6 +955,22 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         @JavascriptInterface
         public void frameDone() {
             frameConsumed = true;
+            long pushed = pushedAtNano;
+            if (pushed > 0) {
+                Perf.end(Perf.ROUND, pushed);   // 帧推给页面 -> 页面解码并上传纹理完成
+            }
+        }
+
+        /** 网页端每 5 秒上报一次 JS 侧指标（decode/upload/draw/raf），统一进 PanoPerf 日志。 */
+        @JavascriptInterface
+        public void logPerf(String key, double p50, double p95, int n) {
+            Perf.logJs(key, p50, p95, n);
+        }
+
+        /** 右侧栏「退出全景」：关闭查看器回到相机页。 */
+        @JavascriptInterface
+        public void exit() {
+            runOnUiThread(MainActivity.this::closeViewer);
         }
 
         void pushRaw(String url) {
@@ -984,7 +1035,8 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         @JavascriptInterface
         public void setQuality(int prevW, int saveW) {
             previewOutW = Math.max(512, Math.min(1536, prevW));
-            saveOutW = Math.max(512, Math.min(4096, saveW));
+            saveOutW = Math.max(512, Math.min(2784, saveW));
+            cameraView.setSizes(previewOutW);
             runOnUiThread(MainActivity.this::updateStatus);
         }
 
@@ -994,8 +1046,10 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             stabilize = on;
             if (on) {
                 bridge.setRoll(rollDeg);
+                cameraView.setRoll(rollDeg);
             } else {
                 bridge.setRoll(0f);
+                cameraView.setRoll(0f);
             }
             runOnUiThread(MainActivity.this::updateStatus);
         }
@@ -1140,11 +1194,23 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             Toast.makeText(this, "画面尚未就绪", Toast.LENGTH_SHORT).show();
             return;
         }
+        // GPU 正常时拼接结果直接画进编码器 Surface；只有 GPU 拼接不可用才回退 CPU/NEON 送帧
+        final boolean direct = cameraView.isStitchOk();
+        if (!direct) {
+            Toast.makeText(this, "GPU 拼接不可用，录制回退 CPU（帧率会明显下降）",
+                    Toast.LENGTH_SHORT).show();
+        }
         try {
             int ow = hiOutW();
-            EquirectRecorder rec = new EquirectRecorder(this, ow, ow / 2);
+            EquirectRecorder rec = new EquirectRecorder(this, ow, ow / 2, direct);
+            long rs = Perf.t();
             rec.start();
+            Perf.end(Perf.REC_START, rs);        // MediaCodec + MediaMuxer + EGL 初始化
             recorder = rec;
+            if (direct) {
+                cameraView.setRecorder(rec);
+                cameraView.setRoll(stabilize ? rollDeg : 0f);
+            }
             onRecordState(true, null, null);
         } catch (Throwable t) {
             Log.e("PanoCam", "start recorder failed", t);
@@ -1159,11 +1225,20 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         if (rec == null) {
             return;
         }
+        final GlPreview gl = cameraView;
+        if (gl != null) {
+            gl.setRecorder(null);
+        }
         new Thread(() -> {
             String path = null;
             String error = null;
             try {
+                if (gl != null) {
+                    gl.flush();      // 等 GL 线程解绑编码器 Surface 再收编码器
+                }
+                long rs = Perf.t();
                 path = rec.stop();
+                Perf.end(Perf.REC_STOP, rs);     // 收尾编码 + muxer 完成 + 相册落盘
             } catch (Throwable t) {
                 error = "结束录制失败: " + t;
             }
@@ -1179,9 +1254,17 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             Toast.makeText(this, "画面尚未就绪", Toast.LENGTH_SHORT).show();
             return;
         }
-        // 回读必须在 UI 线程；拍照单独按原生分辨率取一帧，再在后台拼接
+        sendToPage("window.panoOnEvent && panoOnEvent('shutter','')");
+        if (cameraView.isStitchOk()) {
+            // GPU 直接按保存尺寸拼接后回读，省掉 Bitmap 再上传纹理的一次往返
+            cameraView.requestPhoto(hiOutW());
+            return;
+        }
+        // 回退：按相机原生分辨率回读一帧，CPU/NEON 拼接
         int[] size = new int[2];
+        long g0 = Perf.t();
         final int[] frame = grabPreview(hiSrcW(), hiSrcH(), size, null);
+        Perf.end(Perf.P_GRAB, g0);
         if (frame == null) {
             Toast.makeText(this, "读取画面失败", Toast.LENGTH_SHORT).show();
             return;
@@ -1190,28 +1273,50 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         final int fh = size[1];
         final int ow = hiOutW();
         final int oh = ow / 2;
-        final float rollRad = stabilize ? (float) Math.toRadians(rollDeg) : 0f;
-        sendToPage("window.panoOnEvent && panoOnEvent('shutter','')");
         new Thread(() -> {
-            String msg;
             try {
-                int[] eq = PanoStitcher.stitchEquirectFast(frame, fw, fh, ow, oh, null);
+                long st = Perf.t();
+                int[] eq = PanoStitcher.stitchEquirectFast(frame, fw, fh, ow, oh, photoBuf);
+                Perf.end(Perf.P_STITCH, st);
                 if (eq == null) {
                     throw new IllegalStateException("拼接失败");
                 }
+                photoBuf = eq;   // 复用输出缓冲，避免每次拍照都分配 8~13MB
+                saveEquirectPhoto(eq, ow, oh);
+            } catch (Throwable t) {
+                final String m = "照片保存失败: " + t;
+                ui.post(() -> Toast.makeText(this, m, Toast.LENGTH_LONG).show());
+            }
+        }, "photo").start();
+    }
+
+    /** 把拼接好的 2:1 等距原图（按防抖角度摆正）写进相册 Pictures/PanoCam。 */
+    private void saveEquirectPhoto(int[] eqIn, int ow, int oh) {
+        final long pStart = Perf.t();
+        new Thread(() -> {
+            String msg;
+            try {
+                int[] eq = eqIn;
+                float rollRad = stabilize ? (float) Math.toRadians(rollDeg) : 0f;
+                long rt = Perf.t();
                 if (rollRad != 0f) {
                     eq = PanoStitcher.rotateEquirect(eq, ow, oh, rollRad);
                 }
+                Perf.end(Perf.P_ROTATE, rt);
+                long p0 = Perf.t();
                 Bitmap bmp = Bitmap.createBitmap(eq, ow, oh, Bitmap.Config.ARGB_8888);
                 ByteArrayOutputStream bos = new ByteArrayOutputStream();
-                bmp.compress(Bitmap.CompressFormat.PNG, 100, bos);
+                // PNG 压缩要秒级，JPEG 95 只要百毫秒级，文件也更小
+                bmp.compress(Bitmap.CompressFormat.JPEG, 95, bos);
                 bmp.recycle();
                 byte[] bytes = bos.toByteArray();
-                String name = "pano-" + System.currentTimeMillis() + ".png";
+                Perf.end(Perf.P_PNG, p0);      // ARGB->Bitmap + JPEG 压缩 + 取字节
+                String name = "pano-" + System.currentTimeMillis() + ".jpg";
+                long io0 = Perf.t();
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     ContentValues cv = new ContentValues();
                     cv.put(MediaStore.Images.Media.DISPLAY_NAME, name);
-                    cv.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
+                    cv.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
                     cv.put(MediaStore.Images.Media.RELATIVE_PATH,
                             Environment.DIRECTORY_PICTURES + "/PanoCam");
                     cv.put(MediaStore.Images.Media.IS_PENDING, 1);
@@ -1241,12 +1346,14 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                     }
                     msg = "已保存 " + ow + "x" + oh + " 拼接原图: " + f.getAbsolutePath();
                 }
+                Perf.end(Perf.P_IO, io0);        // MediaStore 写入 / 文件落盘
+                Perf.end(Perf.P_ALL, pStart);    // 拍照端到端
             } catch (Throwable t) {
                 msg = "照片保存失败: " + t;
             }
             final String m = msg;
             ui.post(() -> Toast.makeText(this, m, Toast.LENGTH_LONG).show());
-        }, "photo").start();
+        }, "photo-save").start();
     }
 
     /** 手势触发后延时 1 秒再执行，等相机画面稳定。 */
@@ -1264,77 +1371,40 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     // ---------------- 拼接 / 查看器 ----------------
 
     private void doStitch() {
-        if (stitching) {
-            return;
-        }
         if (!previewing) {
             Toast.makeText(this, "还没有收到相机画面", Toast.LENGTH_SHORT).show();
             return;
         }
-        int[] size = new int[2];
-        int[] frame = capturePreview(size);
-        if (frame == null) {
-            Toast.makeText(this, "读取预览画面失败", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        stitching = true;
-        stitchBtn.setText("拼接中");
-        final int fw = size[0];
-        final int fh = size[1];
-        new Thread(() -> {
-            try {
-                int[] eq = PanoStitcher.stitchEquirectFast(frame, fw, fh, previewOutW, previewOutW / 2, stitchBuf);
-                if (eq == null) {
-                    throw new IllegalStateException("拼接失败");
-                }
-                stitchBuf = eq;
-                equirectPixels = eq;
-                eqW = previewOutW;
-                eqH = previewOutW / 2;
-                saveEquirect(eq);
-                ui.post(() -> {
-                    stitching = false;
-                    stitchBtn.setText("拼接");
-                    showViewer();
-                });
-            } catch (Throwable t) {
-                ui.post(() -> {
-                    stitching = false;
-                    stitchBtn.setText("拼接");
-                    Toast.makeText(MainActivity.this, "拼接失败: " + t, Toast.LENGTH_LONG).show();
-                });
-            }
-        }, "stitch").start();
+        // 实时拼接已经在跑（GPU 每帧 / CPU 兜底每轮），直接进全景页即可
+        showViewer();
     }
 
     /**
-     * 从 TextureView 回读预览帧。getBitmap 支持缩放到目标尺寸：
-     * 预览拼接按 1280x640 回读省开销，录制/拍照按相机原生分辨率回读保证画质。
+     * 回读一帧原始相机画面（CPU 兜底路径用）。
+     * 老的 getBitmap 会走 UI 线程 + Bitmap 中转，这里改成 GL 线程整帧回读。
      */
     private int[] grabPreview(int wantW, int wantH, int[] sizeOut, int[] reuse) {
         if (cameraView == null) {
             return null;
         }
-        Bitmap bmp = cameraView.getBitmap(wantW, wantH);
-        if (bmp == null) {
+        int w = Math.max(2, wantW & ~1);
+        int h = Math.max(2, wantH & ~1);
+        int[] px = cameraView.grabRaw(w, h);
+        if (px == null) {
             return null;
         }
-        int w = bmp.getWidth();
-        int h = bmp.getHeight();
-        if (w <= 0 || h <= 0) {
-            bmp.recycle();
-            return null;
-        }
-        int[] buf = (reuse != null && reuse.length == w * h) ? reuse : new int[w * h];
-        bmp.getPixels(buf, 0, w, 0, 0, w, h);
-        bmp.recycle();
         sizeOut[0] = w;
         sizeOut[1] = h;
-        return buf;
+        return px;
     }
 
     private int[] capturePreview(int[] sizeOut) {
-        int[] px = grabPreview(CAPTURE_W, CAPTURE_H, sizeOut, captureBuf);
+        // 回读分辨率不必高于预览拼接宽度：1024 档回读 1024x512，比固定 1280x640 省一半多
+        int w = Math.min(CAPTURE_W, Math.max(640, previewOutW));
+        if ((w & 1) != 0) {
+            w--;
+        }
+        int[] px = grabPreview(w, w / 2, sizeOut, captureBuf);
         if (px != null) {
             captureBuf = px;
         }
@@ -1390,15 +1460,11 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     }
 
     private void showViewer() {
-        if (equirectPixels == null) {
-            return;
-        }
         if (!webLoaded) {
             web.loadUrl(WEB_PAGE);
             webLoaded = true;
         }
         web.setVisibility(View.VISIBLE);
-        closeBtn.setVisibility(View.VISIBLE);
         hint.setVisibility(View.GONE);
         status.setVisibility(View.GONE);
         controls.setVisibility(View.GONE);
@@ -1411,17 +1477,24 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         liveFrameMs = 0;
         lastLiveFrameAt = 0;
         lastFpsPushAt = 0;
-        // 进入全景后持续用最新画面重拼并推给网页，节奏由「上一帧是否已渲染完」驱动
         ui.removeCallbacks(liveStitch);
-        ui.postDelayed(liveStitch, 300);
+        if (cameraView != null && cameraView.isStitchOk()) {
+            // GPU 路径：GL 线程每帧自己拼并回调，不需要 UI 线程轮询
+            cameraView.setPreviewEnabled(true);
+        } else {
+            // CPU 兜底：进入全景后用 UI 线程轮询重拼
+            ui.postDelayed(liveStitch, 300);
+        }
     }
 
     private void closeViewer() {
         web.setVisibility(View.GONE);
-        closeBtn.setVisibility(View.GONE);
         status.setVisibility(View.VISIBLE);
         controls.setVisibility(View.VISIBLE);
         ui.removeCallbacks(liveStitch);
+        if (cameraView != null) {
+            cameraView.setPreviewEnabled(false);
+        }
         hint.setVisibility(View.VISIBLE);
         viewerVisible = false;
         resetGestures();
@@ -1437,6 +1510,9 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             if (web == null || web.getVisibility() != View.VISIBLE) {
                 return;
             }
+            if (cameraView != null && cameraView.isStitchOk()) {
+                return;   // GPU 路径由 GL 线程回调驱动
+            }
             if (!bridge.canStitch()) {
                 // 上一帧还在 WebView 里解码/上传，等它消费完再拼，避免堆帧
                 ui.postDelayed(this, 24);
@@ -1451,8 +1527,69 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         ui.postDelayed(liveStitch, delay);
     }
 
-    /** 用当前预览帧重新拼接等距全景，编码后推给网页端渲染。 */
+    /** GPU 路径：GL 线程拼好一帧后回调，这里只做 JPEG 编码 + 推给网页。 */
+    private void handleGlPreview(final int[] eq, final int ow, final int oh) {
+        final long t0 = Perf.t();
+        renderExec.execute(() -> {
+            try {
+                equirectPixels = eq;
+                eqW = ow;
+                eqH = oh;
+                EquirectRecorder rec = recorder;
+                long e0 = Perf.t();
+                // 录制中预览已经降到页面宽度，避免重复缩放大图
+                String url = encodeJpeg(eq, ow, oh, rec != null ? previewOutW : 0);
+                Perf.end(Perf.ENCODE, e0);          // Bitmap 拷贝 + 缩放 + JPEG + base64
+                if (url != null) {
+                    Perf.SIZE.add(Math.max(1L, (url.length() - 24) * 3L / 4L / 1024L) * 1000L);
+                    long p0 = Perf.t();
+                    bridge.pushFrame(url);
+                    Perf.end(Perf.PUSH, p0);
+                }
+                if (bridge.takeRawRequest()) {
+                    int[] raw = cameraView.grabRaw(960, 480);
+                    if (raw != null) {
+                        bridge.pushRaw(encodeJpeg(raw, 960, 480, 0));
+                    }
+                }
+                long t4 = Perf.t();
+                double cost = (t4 - t0) / 1e6;
+                if (lastLiveFrameAt > 0) {
+                    double dt = (t4 - lastLiveFrameAt) / 1e9;
+                    if (dt > 0.001) {
+                        double inst = Math.min(120.0, 1.0 / dt);
+                        liveFps = liveFps <= 0 ? inst : liveFps * 0.85 + inst * 0.15;
+                    }
+                }
+                lastLiveFrameAt = t4;
+                liveFrameMs = liveFrameMs <= 0 ? cost : liveFrameMs * 0.85 + cost * 0.15;
+                Perf.end(Perf.FRAME, t0);
+                Perf.frameTick();
+                long nowMs = System.currentTimeMillis();
+                if (nowMs - lastFpsPushAt > 500) {
+                    lastFpsPushAt = nowMs;
+                    final String fpsText = String.format(Locale.US,
+                            "%.1f fps · %.0f ms", liveFps, liveFrameMs);
+                    ui.post(() -> {
+                        updateStatus();
+                        Perf.flushIfDue();
+                        sendToPage("window.panoOnEvent && panoOnEvent('fps',"
+                                + JSONObject.quote(fpsText) + ")");
+                    });
+                }
+            } catch (Throwable t) {
+                Log.w("PanoCam", "gl preview encode failed", t);
+            } finally {
+                cameraView.releasePreview();
+            }
+        });
+    }
+
+    /** 用当前预览帧重新拼接等距全景，编码后推给网页端渲染（仅 GPU 不可用时的兜底路径）。 */
     private void stitchLive() {
+        if (cameraView != null && cameraView.isStitchOk()) {
+            return;   // GPU 路径走 handleGlPreview
+        }
         if (!previewing || !stitchBusy.compareAndSet(false, true)) {
             ui.postDelayed(liveStitch, 30);
             return;
@@ -1464,6 +1601,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         int[] size = new int[2];
         int[] frame = recording ? captureHighRes(size) : capturePreview(size);
         long t1 = System.nanoTime();
+        Perf.end(Perf.GRAB, t0);   // 预览回读（TextureView.getBitmap + getPixels，UI 线程）
         if (frame == null) {
             stitchBusy.set(false);
             ui.postDelayed(liveStitch, 30);
@@ -1481,7 +1619,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             try {
                 int[] eq = PanoStitcher.stitchEquirectFast(frame, fw, fh, ow, oh,
                         recording ? stitchBufHi : stitchBuf);
-                long t3 = System.nanoTime();
+                Perf.end(Perf.STITCH, t2);
                 if (eq != null) {
                     if (recording) {
                         stitchBufHi = eq;
@@ -1493,10 +1631,23 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                     eqH = oh;
                     // 录制时把这一帧直接送进 2:1 原图编码器（在拼接线程里同步拷进纹理）
                     if (recording) {
+                        long r0 = Perf.t();
                         rec.push(eq, rollRad);
+                        Perf.end(Perf.REC_PUSH, r0);   // 纹理上传 + EGL 呈现（含编码器背压）
+                        Perf.recFrameTick();
                     }
-                    // 预览按页面选择的预览宽度推送，避免 WebView 每帧处理高分辨率
-                    bridge.pushFrame(encodeJpeg(eq, ow, oh, recording ? previewOutW : 0));
+                    // 预览按页面选择的预览宽度推送；录制时每 2 帧推一次，省掉一半预览编码开销
+                    long e0 = Perf.t();
+                    boolean pushPreview = !recording || ((recPreviewTick++ & 1) == 0);
+                    String url = pushPreview
+                            ? encodeJpeg(eq, ow, oh, recording ? previewOutW : 0) : null;
+                    Perf.end(Perf.ENCODE, e0);          // Bitmap 拷贝 + 缩放 + JPEG + base64
+                    if (url != null) {
+                        Perf.SIZE.add(Math.max(1L, (url.length() - 24) * 3L / 4L / 1024L) * 1000L);
+                        long p0 = Perf.t();
+                        bridge.pushFrame(url);
+                        Perf.end(Perf.PUSH, p0);
+                    }
                 }
                 long t4 = System.nanoTime();
                 // 实时帧率：按相邻两帧完成时刻的间隔估计，再做指数平滑
@@ -1517,6 +1668,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                             "%.1f fps · %.0f ms", liveFps, liveFrameMs);
                     ui.post(() -> {
                         updateStatus();
+                        Perf.flushIfDue();
                         // 全景页全屏时状态栏是隐藏的，这里同步一份到页面角标
                         sendToPage("window.panoOnEvent && panoOnEvent('fps',"
                                 + JSONObject.quote(fpsText) + ")");
@@ -1525,9 +1677,8 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 if (bridge.takeRawRequest()) {
                     bridge.pushRaw(encodeJpeg(frame, fw, fh, 960));
                 }
-                Log.i("PanoCam", String.format(Locale.US,
-                        "frame cap=%.1fms stitch=%.1fms jpeg=%.1fms total=%.1fms",
-                        (t1 - t0) / 1e6, (t3 - t2) / 1e6, (t4 - t3) / 1e6, (t4 - t0) / 1e6));
+                Perf.end(Perf.FRAME, t0);   // 单帧端到端（回读 -> 拼接 -> 编码 -> 推页面）
+                Perf.frameTick();
             } catch (Throwable t) {
                 Log.w("PanoCam", "stitch frame failed", t);
             } finally {
@@ -1637,6 +1788,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 rollDeg += d * 0.18f;
                 // 防抖关闭时预览也不做补偿，保证「看到的就是保存下来的朝向」
                 bridge.setRoll(stabilize ? rollDeg : 0f);
+                cameraView.setRoll(stabilize ? rollDeg : 0f);
             }
             onGestureTilt();
             return;

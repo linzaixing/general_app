@@ -1,8 +1,11 @@
 package com.example.panocam;
 
+import android.util.Log;
+
 /**
  * 全景相机双鱼眼拼接与全景投影（纯 Java 移植自 PC 端 stitch_fisheye.py）。
  * 参数直接使用原 App 的 offset，不重新标定。
+ * 拼接内层循环优先走 NEON 原生实现，不可用/自检失败时自动回退 Java。
  */
 public final class PanoStitcher {
 
@@ -48,6 +51,16 @@ public final class PanoStitcher {
             lens[i][3] = roll;
         }
         return lens;
+    }
+
+    /** GPU 拼接用：暴露按帧宽缩放后的镜头参数 {cx, cy, r, roll°}。 */
+    static float[][] lensParams(int frameW) {
+        return parseLenses(frameW);
+    }
+
+    /** GPU 拼接用：两镜头融合带半宽（弧度）。 */
+    static float blendRad() {
+        return (float) Math.toRadians(BLEND_DEG);
     }
 
     /** NV21 -> ARGB，供拼接使用。长度不足时返回 null。 */
@@ -193,16 +206,33 @@ public final class PanoStitcher {
                 return t;
             });
 
-    private static EquirectLut lutCache;
+    /**
+     * LUT 缓存：预览尺寸和录制/拍照尺寸各留一份。
+     * 之前只有单槽，拍照时 2048 的表会被预览帧挤掉，每拍一次都要重建（实测 ~1.2s）。
+     */
+    private static final int LUT_SLOTS = 2;
+    private static final EquirectLut[] lutCache = new EquirectLut[LUT_SLOTS];
+    private static int lutNext;
 
     private static synchronized EquirectLut lutFor(int fw, int fh, int ow, int oh) {
-        EquirectLut l = lutCache;
-        if (l != null && l.fw == fw && l.fh == fh && l.ow == ow && l.oh == oh) {
-            return l;
+        for (int i = 0; i < LUT_SLOTS; i++) {
+            EquirectLut l = lutCache[i];
+            if (l != null && l.fw == fw && l.fh == fh && l.ow == ow && l.oh == oh) {
+                return l;
+            }
         }
-        l = new EquirectLut(fw, fh, ow, oh);
-        lutCache = l;
+        EquirectLut l = new EquirectLut(fw, fh, ow, oh);
+        lutCache[lutNext] = l;
+        lutNext = (lutNext + 1) % LUT_SLOTS;
         return l;
+    }
+
+    /** 清空 LUT 缓存（拼接测速、或内存紧张时用）。 */
+    public static synchronized void clearLutCache() {
+        for (int i = 0; i < LUT_SLOTS; i++) {
+            lutCache[i] = null;
+        }
+        lutNext = 0;
     }
 
     /** 预计算的采样表（每种输出尺寸一份，缓存复用）。 */
@@ -329,7 +359,33 @@ public final class PanoStitcher {
         int[] out = new int[w * h];
         float c = (float) Math.cos(rollRad);
         float s = (float) Math.sin(rollRad);
-        for (int y = 0; y < h; y++) {
+        // 按行拆到多核：2560x1280 单线程实测 ~700ms，并行后 ~200ms
+        int threads = WORKERS;
+        if (threads <= 1 || h < 128) {
+            rotateRows(src, out, w, h, c, s, 0, h);
+            return out;
+        }
+        int chunk = (h + threads - 1) / threads;
+        java.util.List<java.util.concurrent.Future<?>> pending =
+                new java.util.ArrayList<>(threads - 1);
+        for (int y = chunk; y < h; y += chunk) {
+            final int y0 = y;
+            final int y1 = Math.min(h, y + chunk);
+            pending.add(POOL.submit(() -> rotateRows(src, out, w, h, c, s, y0, y1)));
+        }
+        rotateRows(src, out, w, h, c, s, 0, Math.min(chunk, h));
+        for (java.util.concurrent.Future<?> f : pending) {
+            try {
+                f.get();
+            } catch (Throwable ignored) {
+            }
+        }
+        return out;
+    }
+
+    private static void rotateRows(int[] src, int[] out, int w, int h,
+                                   float c, float s, int y0, int y1) {
+        for (int y = y0; y < y1; y++) {
             double lat = Math.PI / 2.0 - Math.PI * y / (h - 1);
             float clat = (float) Math.cos(lat);
             float slat = (float) Math.sin(lat);
@@ -347,7 +403,6 @@ public final class PanoStitcher {
                 out[row + x] = bilinearWrap(src, w, h, u, v);
             }
         }
-        return out;
     }
 
     private static int bilinearWrap(int[] px, int w, int h, float u, float v) {
@@ -377,7 +432,25 @@ public final class PanoStitcher {
         return 0xFF000000 | (r << 16) | (g << 8) | bl;
     }
 
+    /**
+     * 拼接一行区间：优先 NEON 原生实现，异常时永久回退 Java，保证结果正确性。
+     */
     private static void stitchRows(EquirectLut lut, int[] frame, int[] out, int yStart, int yEnd) {
+        if (nativeUsable) {
+            try {
+                stitchRowsNative(frame, out, lut.fw, lut.fh, lut.ow, yStart, yEnd,
+                        lut.ul, lut.vl, lut.ul2, lut.vl2,
+                        lut.ur, lut.vr, lut.ur2, lut.vr2, lut.blend);
+                return;
+            } catch (Throwable t) {
+                nativeUsable = false;
+                Log.w("PanoPerf", "native stitch failed, fallback to java", t);
+            }
+        }
+        stitchRowsJava(lut, frame, out, yStart, yEnd);
+    }
+
+    private static void stitchRowsJava(EquirectLut lut, int[] frame, int[] out, int yStart, int yEnd) {
         int ow = lut.ow;
         int stride = lut.fw;
         int fh = lut.fh;
@@ -572,5 +645,80 @@ public final class PanoStitcher {
             }
         }
         return out;
+    }
+
+    // ---------------- NEON 原生内核 ----------------
+
+    private static volatile boolean nativeUsable;
+
+    /**
+     * 拼接一批行（C++/NEON 实现）。采样坐标来自 Java 侧 LUT，语义与 stitchRowsJava 一致。
+     */
+    private static native void stitchRowsNative(int[] frame, int[] out, int fw, int fh, int ow,
+                                                int yStart, int yEnd,
+                                                float[] ul, float[] vl, float[] ul2, float[] vl2,
+                                                float[] ur, float[] vr, float[] ur2, float[] vr2,
+                                                float[] blend);
+
+    static {
+        boolean ok = false;
+        try {
+            System.loadLibrary("panostitch");
+            ok = verifyNative();
+        } catch (Throwable t) {
+            Log.w("PanoPerf", "native stitch unavailable: " + t);
+        }
+        nativeUsable = ok;
+        Log.i("PanoPerf", "native stitch=" + (ok ? "neon" : "java"));
+    }
+
+    /** 原生内核是否生效（测速日志里会打出来）。 */
+    public static boolean isNativeUsable() {
+        return nativeUsable;
+    }
+
+    /**
+     * 自检：用 256x128 合成画面跑一遍 native 和 Java，逐像素比较。
+     * 误差超过阈值就回退 Java，避免移植偏差扩散到成片。
+     */
+    private static boolean verifyNative() {
+        final int fw = 256;
+        final int fh = 128;
+        final int ow = 128;
+        final int oh = 64;
+        EquirectLut lut = new EquirectLut(fw, fh, ow, oh);
+        int[] frame = new int[fw * fh];
+        for (int i = 0; i < frame.length; i++) {
+            int y = i / fw;
+            int x = i % fw;
+            frame[i] = 0xFF000000
+                    | (((x * 7) & 0xFF) << 16)
+                    | (((y * 13) & 0xFF) << 8)
+                    | ((x + y) & 0xFF);
+        }
+        int[] a = new int[ow * oh];
+        int[] b = new int[ow * oh];
+        stitchRowsJava(lut, frame, a, 0, oh);
+        stitchRowsNative(frame, b, fw, fh, ow, 0, oh,
+                lut.ul, lut.vl, lut.ul2, lut.vl2, lut.ur, lut.vr, lut.ur2, lut.vr2, lut.blend);
+        int bad = 0;
+        int maxErr = 0;
+        for (int i = 0; i < a.length; i++) {
+            if ((a[i] >>> 24) != (b[i] >>> 24)) {
+                bad++;
+                continue;
+            }
+            for (int sh = 0; sh < 24; sh += 8) {
+                int d = Math.abs(((a[i] >> sh) & 0xFF) - ((b[i] >> sh) & 0xFF));
+                if (d > maxErr) {
+                    maxErr = d;
+                }
+                if (d > 2) {
+                    bad++;
+                }
+            }
+        }
+        Log.i("PanoPerf", "native selfTest maxErr=" + maxErr + " bad=" + bad + "/" + a.length);
+        return maxErr <= 2 && bad <= a.length / 100;
     }
 }

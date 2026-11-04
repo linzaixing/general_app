@@ -149,20 +149,13 @@
   <button id="btnStab">防抖</button>
   <button id="btnQuality">画质</button>
   <button id="btnGyro">陀螺仪</button>
-  <button id="btnHunt">寻宝游戏</button>
-  <button id="btnMag">放大镜</button>
   <button id="btnGrid">经纬网格</button>
   <button id="btnSeam">拼接缝标记</button>
-  <button id="btnCompare">原图对比</button>
   <button id="btnSpot">添加热点</button>
-  <button id="btnLink">复制视角</button>
-  <button id="btnPoster">导出海报</button>
+  <button id="btnExit">退出全景</button>
 </div>
 <div class="hud" id="hud"></div>
 <div class="layer" id="spotLayer"></div>
-<div class="layer" id="huntLayer"></div>
-<div class="mag" id="mag"></div>
-<div class="compare" id="compare"><img id="rawImg" alt="原始双鱼眼"><div class="handle" id="cmpHandle"></div></div>
 <div class="toast" id="toast"></div>
 <div class="rec" id="recHud"><i></i><span id="recTime">REC 00:00</span></div>
 <div class="flash" id="flash"></div>
@@ -181,7 +174,7 @@
   </div>
   <div class="row"><span>保存分辨率</span>
     <div class="seg" id="qSave">
-      <button data-w="1024">1024×512</button><button data-w="2048">2048×1024</button><button data-w="4096">4096×2048</button>
+      <button data-w="1024">1024×512</button><button data-w="2048">2048×1024</button><button data-w="2784">2784×1392</button>
     </div>
   </div>
   <button class="close" id="qClose">关闭</button>
@@ -196,15 +189,42 @@ const DEG = Math.PI / 180;
 const HOST = window.PanoHost || null;
 
 // 画质 / 防抖设置：网页与 App 共用；App 端会把数值下发给原生拼接
-const QUALITY_KEY = 'pano-quality-v1';
+// v4：画质优先——采集 3008×1504，保存上限 2784×1392（拼接光学极限）
+const QUALITY_KEY = 'pano-quality-v4';
 const STAB_KEY = 'pano-stab-v1';
-let quality = { preview: 1024, save: 2048 };
+let quality = { preview: 1536, save: 2784 };
 try {
   const q = JSON.parse(localStorage.getItem(QUALITY_KEY) || 'null');
   if (q && q.preview && q.save) quality = q;
 } catch (e) {}
 // 防抖默认开启：预览和保存的原图都按重力 roll 锁定地平线；关掉则用相机原始朝向
 let stabilize = localStorage.getItem(STAB_KEY) !== '0';
+
+// --- 性能采样 ---------------------------------------------------------------
+// App 内每 5 秒把 JS 侧 decode/upload/draw/帧间隔的 p50/p95 上报到 PanoPerf 日志
+const perfBuf = { decode: [], upload: [], draw: [], raf: [] };
+let frameSetAt = 0;
+function perfAdd(k, v) {
+  const b = perfBuf[k];
+  if (!b || !Number.isFinite(v)) return;
+  b.push(v);
+  if (b.length > 300) b.shift();
+}
+function perfPct(b, p) {
+  if (!b.length) return 0;
+  const a = b.slice().sort((x, y) => x - y);
+  return a[Math.floor((a.length - 1) * p)];
+}
+if (HOST && HOST.logPerf) {
+  setInterval(() => {
+    for (const k of ['decode', 'upload', 'draw', 'raf']) {
+      const b = perfBuf[k];
+      if (!b.length) continue;
+      HOST.logPerf(k, perfPct(b, 0.5), perfPct(b, 0.95), b.length);
+      b.length = 0;
+    }
+  }, 5000);
+}
 
 // ---------------------------------------------------------------------------
 // 着色器：每像素反推球面方向，按投影模式采样 equirect 贴图
@@ -313,11 +333,8 @@ let mode = 0;
 let ready = false;
 let gridOn = false;
 let seamOn = false;
-let magOn = false;
-let compareOn = false;
 let spotMode = false;     // 添加热点待点击
 let gyroOn = false;
-let magYaw = null, magPitch = null;
 const fling = { yaw: 0, pitch: 0 };
 
 const gl = canvas.getContext('webgl2', { antialias: false, alpha: false });
@@ -383,6 +400,11 @@ img.onload = () => uploadTexture(img);
 img.onerror = () => { if (!HOST) fail('加载 equirect.jpg 失败，请用 pano_demo.py 启动后再访问。'); };
 
 function uploadTexture(image) {
+  if (HOST && frameSetAt) {
+    perfAdd('decode', performance.now() - frameSetAt);   // dataURL -> 解码完成
+    frameSetAt = 0;
+  }
+  const u0 = performance.now();
   gl.bindTexture(gl.TEXTURE_2D, tex);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
   if (!HOST) gl.generateMipmap(gl.TEXTURE_2D);   // 实时帧不做 mipmap，省掉每帧开销
@@ -391,6 +413,7 @@ function uploadTexture(image) {
     const max = gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT);
     gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(max, 8));
   }
+  perfAdd('upload', performance.now() - u0);
   ready = true;
   if (HOST && HOST.frameDone) HOST.frameDone();   // 通知 App 可以拼下一帧了
 }
@@ -532,30 +555,8 @@ function drawScene(w, h, cam, opts) {
 }
 
 function draw() {
-  const dpr = resize();
+  resize();
   drawScene(canvas.width, canvas.height, cur);
-
-  // 放大镜：右下角 3 倍局部放大（视口原点必须传给着色器，否则只有左下角一块有效）
-  if (magOn) {
-    const size = Math.round(200 * dpr);
-    const m = Math.round(18 * dpr);
-    const x = canvas.width - size - m;
-    const y = Math.round(70 * dpr);
-    const cam = {
-      yaw: magYaw != null ? magYaw : cur.yaw,
-      pitch: magPitch != null ? magPitch : cur.pitch,
-      zoom: cur.zoom, fov: cur.fov, roll: cur.roll
-    };
-    gl.enable(gl.SCISSOR_TEST);
-    gl.scissor(x, y, size, size);
-    drawScene(size, size, cam, {
-      origin: [x, y],
-      fov: (mode === 1 || mode === 2) ? cam.fov : Math.max(LIMIT.fov[0], cam.fov / 3),
-      grid: 0
-    });
-    gl.disable(gl.SCISSOR_TEST);
-    gl.viewport(0, 0, canvas.width, canvas.height);
-  }
 }
 
 // --- 覆盖层更新 -------------------------------------------------------------
@@ -693,7 +694,6 @@ function stopHunt() {
   huntTargets.forEach(t => t.el && t.el.remove());
   huntTargets = [];
   hud.classList.remove('on');
-  document.getElementById('btnHunt').classList.remove('on');
 }
 
 function updateHud() {
@@ -776,11 +776,6 @@ canvas.addEventListener('pointermove', e => {
   }
 
   const rect = canvas.getBoundingClientRect();
-  if (magOn && !dragging) {
-    const w = screenToWorld(e.clientX - rect.left, e.clientY - rect.top, cur);
-    magYaw = w ? w.lon : null;
-    magPitch = w ? -w.lat : null;
-  }
   if (!dragging) return;
   const dx = (e.clientX - lx) / canvas.clientWidth;
   const dy = (e.clientY - ly) / canvas.clientHeight;
@@ -909,35 +904,11 @@ function toggleGyro() {
 }
 
 // --- 工具栏 -----------------------------------------------------------------
-const btnHunt = document.getElementById('btnHunt');
-const btnMag = document.getElementById('btnMag');
 const btnGrid = document.getElementById('btnGrid');
-const btnCompare = document.getElementById('btnCompare');
 const btnSpot = document.getElementById('btnSpot');
-const btnLink = document.getElementById('btnLink');
-const btnPoster = document.getElementById('btnPoster');
-const magEl = document.getElementById('mag');
-const compareEl = document.getElementById('compare');
-const rawImg = document.getElementById('rawImg');
+const btnExit = document.getElementById('btnExit');
 
 document.getElementById('btnGyro').addEventListener('click', toggleGyro);
-
-btnHunt.addEventListener('click', () => {
-  if (huntOn) {
-    stopHunt();
-    btnHunt.classList.remove('on');
-  } else {
-    startHunt();
-    btnHunt.classList.add('on');
-  }
-});
-btnMag.addEventListener('click', () => {
-  magOn = !magOn;
-  btnMag.classList.toggle('on', magOn);
-  magEl.classList.toggle('on', magOn);
-  magYaw = magPitch = null;
-});
-canvas.addEventListener('pointerleave', () => { magYaw = magPitch = null; });
 
 btnGrid.addEventListener('click', () => {
   gridOn = !gridOn;
@@ -951,21 +922,6 @@ btnSeam.addEventListener('click', () => {
   toast(seamOn ? '蓝色区域即两镜头融合带（±10°）' : '已关闭拼接缝标记');
 });
 
-btnCompare.addEventListener('click', () => {
-  compareOn = !compareOn;
-  btnCompare.classList.toggle('on', compareOn);
-  compareEl.classList.toggle('on', compareOn);
-  if (compareOn) {
-    if (HOST) {
-      rawImg.removeAttribute('src');
-      HOST.requestRaw();
-    } else if (!rawImg.getAttribute('src')) {
-      rawImg.src = 'raw.jpg';
-      rawImg.onerror = () => toast('raw.jpg 未提供，请用 pano_demo.py 启动');
-    }
-  }
-});
-
 btnSpot.addEventListener('click', () => {
   if (mode === 1 || mode === 2) { toast('小行星/兔子洞模式下无法添加热点'); return; }
   spotMode = !spotMode;
@@ -973,43 +929,15 @@ btnSpot.addEventListener('click', () => {
   if (spotMode) toast('点击画面任意位置添加热点');
 });
 
-btnLink.addEventListener('click', async () => {
-  const u = new URL(location.href);
-  u.searchParams.set('mode', String(mode));
-  u.searchParams.set('yaw', cur.yaw.toFixed(3));
-  u.searchParams.set('pitch', cur.pitch.toFixed(3));
-  u.searchParams.set('fov', cur.fov.toFixed(1));
-  u.searchParams.set('zoom', cur.zoom.toFixed(3));
-  const link = u.toString();
-  if (HOST && HOST.copyText) {
-    HOST.copyText(link);
-    toast('视角链接已复制');
-    return;
-  }
-  try {
-    await navigator.clipboard.writeText(link);
-    toast('视角链接已复制');
-  } catch (e) {
-    toast('复制失败，链接已打印到控制台');
-    console.log(link);
+// 右侧栏「退出全景」：App 内通知原生关闭，网页端隐藏
+btnExit.addEventListener('click', () => {
+  if (HOST && HOST.exit) {
+    HOST.exit();
+  } else {
+    toast('网页端没有可退出的全景页');
   }
 });
-
-btnPoster.addEventListener('click', exportPoster);
-
-// 对比分割线拖动
-const cmpHandle = document.getElementById('cmpHandle');
-let cmpDrag = false;
-cmpHandle.addEventListener('pointerdown', e => {
-  cmpDrag = true;
-  cmpHandle.setPointerCapture(e.pointerId);
-});
-cmpHandle.addEventListener('pointermove', e => {
-  if (!cmpDrag) return;
-  const pct = clamp(e.clientX / window.innerWidth * 100, 5, 95);
-  compareEl.style.setProperty('--split', pct + '%');
-});
-cmpHandle.addEventListener('pointerup', () => { cmpDrag = false; });
+if (!HOST) btnExit.style.display = 'none';
 
 // --- 海报导出 ---------------------------------------------------------------
 async function exportPoster() {
@@ -1276,14 +1204,15 @@ setStabilize(stabilize, true);
 let lastHostPoll = 0;
 
 function pollHost(now) {
-  if (!HOST || now - lastHostPoll < 55) return;
+  // 8ms 节流：rAF 每次（~11ms）都能取到最新帧；之前 55ms 把预览帧率卡在 ~9fps
+  if (!HOST || now - lastHostPoll < 8) return;
   lastHostPoll = now;
 
   const frame = HOST.pollFrame();
-  if (frame && frame.length) img.src = frame;      // img.onload 统一走 uploadTexture
-
-  const raw = HOST.pollRaw();
-  if (raw && raw.length) rawImg.src = raw;
+  if (frame && frame.length) {
+    frameSetAt = performance.now();
+    img.src = frame;      // img.onload 统一走 uploadTexture
+  }
 
   const g = HOST.pollGyro();
   if (g && g.length) {
@@ -1304,8 +1233,10 @@ function pollHost(now) {
 // --- 主循环 -----------------------------------------------------------------
 let last = performance.now();
 function frame(now) {
-  const dt = Math.min((now - last) / 1000, 0.1);
+  const rafDt = now - last;
+  const dt = Math.min(rafDt / 1000, 0.1);
   last = now;
+  if (HOST) perfAdd('raf', rafDt);
 
   pollHost(now);
 
@@ -1329,7 +1260,11 @@ function frame(now) {
   if (huntOn) { huntElapsed = performance.now() - huntStart; updateHud(); }
   updateRecUi();
   updateOverlays();
-  if (ready) draw();
+  if (ready) {
+    const d0 = performance.now();
+    draw();
+    if (HOST) perfAdd('draw', performance.now() - d0);   // WebGL 提交耗时（CPU 侧）
+  }
   requestAnimationFrame(frame);
 }
 
