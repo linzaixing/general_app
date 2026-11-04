@@ -3,12 +3,23 @@ plugins { id 'com.android.application' }
 android {
     namespace 'com.example.panocam'
     compileSdk 34
+    ndkVersion '25.2.9519653'
     defaultConfig {
         applicationId "com.example.panocam"
         minSdk 24
         targetSdk 34
-        versionCode 19
-        versionName "1.18"
+        versionCode 33
+        versionName "1.32"
+        ndk {
+            // NEON 拼接内核只编 arm64（设备都是 arm64；其它 ABI 自动回退 Java 实现）
+            abiFilters 'arm64-v8a'
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path file('src/main/cpp/CMakeLists.txt')
+            version '3.22.1'
+        }
     }
     sourceSets {
         main {

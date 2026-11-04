@@ -8,6 +8,7 @@ local.properties
 android/.gradle/
 android/build/
 android/app/build/
+android/app/.cxx/
 android/build.log
 
 # 构建时从仓库根目录同步生成的网页副本

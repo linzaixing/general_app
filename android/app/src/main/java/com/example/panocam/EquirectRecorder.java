@@ -60,6 +60,8 @@ public class EquirectRecorder {
 
     private final Context context;
     private final int width, height;
+    /** true = 由 GlPreview 直接把拼接结果画到编码器 Surface（零回读），本类不再自己起 EGL。 */
+    private final boolean direct;
 
     private MediaCodec codec;
     private Surface inputSurface;
@@ -73,6 +75,8 @@ public class EquirectRecorder {
     private boolean muxerStarted;
     private Thread drainThread;
     private volatile boolean active;
+    private int written;
+    private int dropped;
 
     private EGLDisplay eglDisplay = EGL14.EGL_NO_DISPLAY;
     private EGLContext eglContext = EGL14.EGL_NO_CONTEXT;
@@ -81,9 +85,14 @@ public class EquirectRecorder {
     private FloatBuffer posQuad, texQuad;
 
     public EquirectRecorder(Context context, int width, int height) {
+        this(context, width, height, false);
+    }
+
+    public EquirectRecorder(Context context, int width, int height, boolean direct) {
         this.context = context.getApplicationContext();
         this.width = width;
         this.height = height;
+        this.direct = direct;
     }
 
     public synchronized void start() throws Exception {
@@ -101,15 +110,18 @@ public class EquirectRecorder {
         codec.start();
 
         createMuxer();
-        bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-        setupEgl();
+        if (!direct) {
+            bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            setupEgl();
+        }
         active = true;
         startDrain();
         Log.i(TAG, "equirect recorder started " + width + "x" + height);
     }
 
     private int bitrate() {
-        return Math.max(2_500_000, Math.min(8_000_000, width * height * 6));
+        // 2560×1280@30 大约需要 20Mbps；之前 8Mbps 的上限会让高分辨率视频明显糊
+        return Math.max(4_000_000, Math.min(28_000_000, width * height * 6));
     }
 
     private void createMuxer() throws IOException {
@@ -233,9 +245,18 @@ public class EquirectRecorder {
         return width;
     }
 
+    public boolean isActive() {
+        return active;
+    }
+
+    /** MediaCodec 的输入 Surface（direct 模式下由 GlPreview 直接渲染）。 */
+    public Surface inputSurface() {
+        return inputSurface;
+    }
+
     /** 送一帧拼接好的 2:1 等距原图；rollRad != 0 时在编码前把地平线摆正。必须拷贝到自己的 Bitmap。 */
     public synchronized void push(int[] argb, float rollRad) {
-        if (!active || codec == null || eglSurface == EGL14.EGL_NO_SURFACE) {
+        if (direct || !active || codec == null || eglSurface == EGL14.EGL_NO_SURFACE) {
             return;
         }
         try {
@@ -290,6 +311,7 @@ public class EquirectRecorder {
                             trackIndex = muxer.addTrack(codec.getOutputFormat());
                             muxer.start();
                             muxerStarted = true;
+                            Log.i(TAG, "rec muxer started fmt=" + codec.getOutputFormat());
                         }
                         continue;
                     }
@@ -304,6 +326,13 @@ public class EquirectRecorder {
                         buf.position(info.offset);
                         buf.limit(info.offset + info.size);
                         muxer.writeSampleData(trackIndex, buf, info);
+                        written++;
+                        if (written <= 3 || written % 30 == 0) {
+                            Log.i(TAG, "rec sample " + written + " size=" + info.size
+                                    + " pts=" + info.presentationTimeUs);
+                        }
+                    } else {
+                        dropped++;
                     }
                     codec.releaseOutputBuffer(id, false);
                     if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
@@ -341,6 +370,8 @@ public class EquirectRecorder {
         synchronized (this) {
             String path = outputUri != null ? outputUri.toString()
                     : (outputFile != null ? outputFile.getAbsolutePath() : null);
+            Log.i(TAG, "rec stop written=" + written + " dropped=" + dropped
+                    + " muxerStarted=" + muxerStarted);
             releaseEgl();
             try {
                 if (codec != null) {
