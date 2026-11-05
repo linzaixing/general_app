@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- libraries.dev 风格：近黑底 + 强调蓝，全局固定暗色 -->
+    <style name="Theme.PanoCam" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/lib_background</item>
+        <item name="android:statusBarColor">@color/lib_background</item>
+        <item name="android:navigationBarColor">@color/lib_background</item>
+        <item name="android:textColorPrimary">@color/lib_text_primary</item>
+        <item name="android:textColorSecondary">@color/lib_text_secondary</item>
+        <item name="android:textColorHint">@color/lib_text_tertiary</item>
+        <item name="colorAccent">@color/lib_accent</item>
+        <item name="android:colorAccent">@color/lib_accent</item>
+    </style>
+</resources>

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- libraries.dev 实测设计令牌：背景 #121212 / 强调蓝 #7DB4FF / 三级灰阶文字 -->
+<resources>
+    <color name="lib_background">#FF121212</color>
+    <color name="lib_surface">#FF1A1A1A</color>
+    <color name="lib_surface_scrim">#B81A1A1A</color>
+    <color name="lib_outline">#1FEDEDED</color>
+    <color name="lib_text_primary">#FFFEFEFE</color>
+    <color name="lib_text_secondary">#B3CACACA</color>
+    <color name="lib_text_tertiary">#FF8B8B8B</color>
+    <color name="lib_accent">#FF7DB4FF</color>
+    <color name="lib_on_accent">#FF121212</color>
+</resources>

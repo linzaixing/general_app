@@ -1,6 +1,8 @@
 package com.example.panocam;
 
 import android.Manifest;
+import android.animation.ObjectAnimator;
+import android.animation.PropertyValuesHolder;
 import android.app.AlertDialog;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
@@ -12,6 +14,8 @@ import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.SurfaceTexture;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
@@ -35,6 +39,7 @@ import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.view.animation.AccelerateDecelerateInterpolator;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -108,6 +113,10 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private GlPreview cameraView;
     private TextView status;
     private TextView hint;
+    private FrameLayout waitLayer;
+    private LinearLayout statusWrap;
+    private View statusDot;
+    private TextView detail;
     private LinearLayout controls;
     private WebView web;
     private Button stitchBtn;
@@ -822,7 +831,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     private View buildRoot() {
         root = new FrameLayout(this);
-        root.setBackgroundColor(Color.BLACK);
+        root.setBackgroundColor(getColor(R.color.lib_background));
 
         cameraContainer = new FrameLayout(this);
         root.addView(cameraContainer, new FrameLayout.LayoutParams(
@@ -833,44 +842,112 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER));
         cameraView.setAspect(2, 1);
 
+        // 等待相机：点阵背景 + 呼吸光斑 + 文案，与查看器页同一套视觉语言
+        waitLayer = new FrameLayout(this);
+        waitLayer.setBackground(new DotGridDrawable(0x1AEDEDED, dp(26), dp(1)));
+        root.addView(waitLayer, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        LinearLayout waitBox = new LinearLayout(this);
+        waitBox.setOrientation(LinearLayout.VERTICAL);
+        waitBox.setGravity(Gravity.CENTER_HORIZONTAL);
+
+        View orb = new View(this);
+        orb.setBackgroundResource(R.drawable.lib_orb);
+        LinearLayout.LayoutParams orbLp = new LinearLayout.LayoutParams(dp(132), dp(132));
+        orbLp.bottomMargin = dp(20);
+        waitBox.addView(orb, orbLp);
+        breathing(orb);
+
+        TextView waitTitle = new TextView(this);
+        waitTitle.setText("等待相机接入");
+        waitTitle.setTextColor(getColor(R.color.lib_text_primary));
+        waitTitle.setTextSize(17);
+        waitTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        waitTitle.setGravity(Gravity.CENTER);
+        waitBox.addView(waitTitle);
+
         hint = new TextView(this);
-        hint.setTextColor(0xFFCCCCCC);
-        hint.setTextSize(14);
+        hint.setTextColor(getColor(R.color.lib_text_tertiary));
+        hint.setTextSize(12);
+        hint.setLineSpacing(dp(5), 1f);
         hint.setGravity(Gravity.CENTER);
-        hint.setText("等待相机画面…\n请确认全景相机已插入并允许 USB 访问");
-        root.addView(hint, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
+        hint.setText("请将全景相机插入 USB 接口\n并在弹窗中允许访问");
+        LinearLayout.LayoutParams hintLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        hintLp.topMargin = dp(10);
+        waitBox.addView(hint, hintLp);
+
+        FrameLayout.LayoutParams waitLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER);
+        waitLp.bottomMargin = dp(48);
+        waitLayer.addView(waitBox, waitLp);
+
+        statusWrap = new LinearLayout(this);
+        statusWrap.setOrientation(LinearLayout.HORIZONTAL);
+        statusWrap.setGravity(Gravity.CENTER_VERTICAL);
+        statusWrap.setBackgroundResource(R.drawable.lib_chip);
+        statusWrap.setPadding(dp(13), dp(9), dp(14), dp(9));
+
+        statusDot = new View(this);
+        statusDot.setBackground(oval(getColor(R.color.lib_text_tertiary)));
+        LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(dp(6), dp(6));
+        dotLp.rightMargin = dp(8);
+        statusWrap.addView(statusDot, dotLp);
 
         status = new TextView(this);
-        status.setTextColor(0xFFFFFFFF);
-        status.setBackgroundColor(0xB0000000);
-        status.setPadding(24, 12, 24, 12);
+        status.setTextColor(getColor(R.color.lib_text_secondary));
         status.setTextSize(11);
+        status.setLineSpacing(dp(3), 1f);
+        status.setMaxWidth(dp(272));
         status.setText("初始化…");
-        root.addView(status, new FrameLayout.LayoutParams(
+        statusWrap.addView(status);
+
+        FrameLayout.LayoutParams statusLp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP | Gravity.START));
-        status.setOnClickListener(v -> {
+                Gravity.TOP | Gravity.START);
+        statusLp.leftMargin = dp(16);
+        statusLp.topMargin = dp(16);
+        root.addView(statusWrap, statusLp);
+
+        detail = new TextView(this);
+        detail.setTextColor(getColor(R.color.lib_text_tertiary));
+        detail.setTextSize(10);
+        detail.setLineSpacing(dp(3), 1f);
+        detail.setBackgroundResource(R.drawable.lib_panel);
+        detail.setPadding(dp(12), dp(10), dp(12), dp(10));
+        detail.setVisibility(View.GONE);
+        FrameLayout.LayoutParams detailLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.START);
+        detailLp.leftMargin = dp(16);
+        detailLp.rightMargin = dp(16);
+        detailLp.topMargin = dp(72);
+        root.addView(detail, detailLp);
+
+        statusWrap.setOnClickListener(v -> {
             if (!hasCameraPermission()) {
                 ensureCameraPermission();
+            } else {
+                detail.setVisibility(detail.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
             }
         });
 
         controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.HORIZONTAL);
         controls.setGravity(Gravity.CENTER);
-        stitchBtn = makeButton("拼接");
+        stitchBtn = makeCtaButton();
         controls.addView(stitchBtn);
         FrameLayout.LayoutParams ctlLp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        ctlLp.bottomMargin = 24;
+        ctlLp.bottomMargin = dp(28);
         root.addView(controls, ctlLp);
 
         // 全景查看器直接复用网页端页面：投影切换、热点、寻宝、放大镜、网格、原图对比、
         // 海报导出等全部与网页一致，App 只额外提供实时帧与陀螺仪数据。
         web = new WebView(this);
-        web.setBackgroundColor(Color.BLACK);
+        web.setBackgroundColor(getColor(R.color.lib_background));
         WebSettings ws = web.getSettings();
         ws.setJavaScriptEnabled(true);
         ws.setDomStorageEnabled(true);
@@ -882,7 +959,8 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         // web 是后加的，会盖住状态栏和按钮；把它们提到最上层，保证全景查看时仍可点。
-        status.bringToFront();
+        detail.bringToFront();
+        statusWrap.bringToFront();
         controls.bringToFront();
 
         stitchBtn.setOnClickListener(v -> doStitch());
@@ -890,22 +968,53 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         return root;
     }
 
-    private Button makeButton(String text) {
+    /** 主行动：白底胶囊 CTA（与 libraries.dev 的按钮同款）。 */
+    private Button makeCtaButton() {
         Button b = new Button(this);
-        b.setText(text);
-        b.setTextSize(12);
+        b.setText("拼接全景");
+        b.setTextSize(14);
         b.setAllCaps(false);
-        b.setTextColor(0xFFFFFFFF);
-        b.setBackgroundColor(0xCC202020);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.leftMargin = 8;
-        lp.rightMargin = 8;
-        b.setLayoutParams(lp);
+        b.setTextColor(getColor(R.color.lib_on_accent));
+        b.setBackgroundResource(R.drawable.lib_cta);
+        b.setPadding(dp(40), dp(15), dp(40), dp(15));
         b.setMinWidth(0);
         b.setMinimumWidth(0);
-        b.setPadding(24, 12, 24, 12);
+        b.setMinHeight(0);
+        b.setMinimumHeight(0);
+        b.setElevation(0f);
+        b.setStateListAnimator(null);
         return b;
+    }
+
+    /** 呼吸动画：把等待态的光斑做活，避免画面像卡死。 */
+    private void breathing(View v) {
+        ObjectAnimator a = ObjectAnimator.ofPropertyValuesHolder(
+                v,
+                PropertyValuesHolder.ofFloat("scaleX", 0.94f, 1.08f),
+                PropertyValuesHolder.ofFloat("scaleY", 0.94f, 1.08f),
+                PropertyValuesHolder.ofFloat("alpha", 0.55f, 1f));
+        a.setDuration(2800);
+        a.setRepeatCount(ObjectAnimator.INFINITE);
+        a.setRepeatMode(ObjectAnimator.REVERSE);
+        a.setInterpolator(new AccelerateDecelerateInterpolator());
+        a.start();
+    }
+
+    private GradientDrawable oval(int color) {
+        GradientDrawable d = new GradientDrawable();
+        d.setShape(GradientDrawable.OVAL);
+        d.setColor(color);
+        return d;
+    }
+
+    private int dp(float v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
+    }
+
+    private void setWaitingVisible(boolean visible) {
+        if (waitLayer != null) {
+            waitLayer.setVisibility(visible ? View.VISIBLE : View.GONE);
+        }
     }
 
     private static float dist(MotionEvent ev) {
@@ -1126,23 +1235,28 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         if (status == null) {
             return;
         }
+        boolean permOk = hasCameraPermission();
         String flow = previewing
                 ? ("实时 " + previewW + "x" + previewH)
                 : "未启动";
-        StringBuilder sb = new StringBuilder();
-        if (!hasCameraPermission()) {
-            sb.append("未授予相机权限，点此授权\n");
+        String fpsLine = liveFps > 0
+                ? String.format(Locale.US, " · %.1f fps", liveFps)
+                : "";
+        status.setText((permOk ? usbText : "未授予相机权限，点此授权")
+                + '\n' + camText + " · " + flow + fpsLine);
+
+        // 状态点：权限缺失=琥珀，预览中=强调蓝，其余=灰
+        int dot = !permOk ? 0xFFF5A623
+                : previewing ? getColor(R.color.lib_accent)
+                : getColor(R.color.lib_text_tertiary);
+        if (statusDot != null) {
+            statusDot.setBackground(oval(dot));
         }
-        sb.append(usbText).append('\n');
-        sb.append(camText).append(" | ").append(flow).append('\n');
+
+        StringBuilder sb = new StringBuilder();
         sb.append(String.format(Locale.US,
                 "陀螺 g=%.2f,%.2f,%.2f a=%.2f,%.2f,%.2f yaw=%.1f",
                 gx, gy, gz, ax, ay, az, yaw));
-        if (!errText.isEmpty()) {
-            sb.append('\n').append(errText);
-        } else if (!previewing && !sizeInfo.isEmpty()) {
-            sb.append('\n').append(sizeInfo);
-        }
         sb.append("\n采集 ").append(CAPTURE_W).append('x').append(CAPTURE_H)
                 .append(" · 预览 ").append(previewOutW).append('x').append(previewOutW / 2)
                 .append(" · 原图 ").append(hiOutW()).append('x').append(hiOutW() / 2)
@@ -1150,10 +1264,16 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         if (liveFps > 0) {
             sb.append(String.format(Locale.US, "\n实时 %.1f fps · %.0f ms/帧", liveFps, liveFrameMs));
         }
-        status.setText(sb.toString());
-        if (hint != null) {
-            hint.setVisibility(previewing ? View.GONE : View.VISIBLE);
+        if (!errText.isEmpty()) {
+            sb.append('\n').append(errText);
+        } else if (!previewing && !sizeInfo.isEmpty()) {
+            sb.append('\n').append(sizeInfo);
         }
+        if (detail != null) {
+            detail.setText(sb.toString());
+        }
+
+        setWaitingVisible(!previewing);
     }
 
     // ---------------- 录制 / 拍照 ----------------
@@ -1465,8 +1585,9 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             webLoaded = true;
         }
         web.setVisibility(View.VISIBLE);
-        hint.setVisibility(View.GONE);
-        status.setVisibility(View.GONE);
+        setWaitingVisible(false);
+        statusWrap.setVisibility(View.GONE);
+        detail.setVisibility(View.GONE);
         controls.setVisibility(View.GONE);
         yaw = 180f;
         pitch = 0f;
@@ -1489,13 +1610,14 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     private void closeViewer() {
         web.setVisibility(View.GONE);
-        status.setVisibility(View.VISIBLE);
+        statusWrap.setVisibility(View.VISIBLE);
         controls.setVisibility(View.VISIBLE);
         ui.removeCallbacks(liveStitch);
         if (cameraView != null) {
             cameraView.setPreviewEnabled(false);
         }
         hint.setVisibility(View.VISIBLE);
+        setWaitingVisible(!previewing);
         viewerVisible = false;
         resetGestures();
         cancelPendingGesture();

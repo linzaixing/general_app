@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 等待态呼吸光斑 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <gradient
+        android:type="radial"
+        android:gradientRadius="62dp"
+        android:startColor="#CC7DB4FF"
+        android:centerColor="#337DB4FF"
+        android:endColor="#007DB4FF" />
+</shape>
