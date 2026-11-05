@@ -8,8 +8,8 @@ android {
         applicationId "com.example.panocam"
         minSdk 24
         targetSdk 34
-        versionCode 36
-        versionName "1.35"
+        versionCode 37
+        versionName "1.36"
         ndk {
             // NEON 拼接内核只编 arm64（设备都是 arm64；其它 ABI 自动回退 Java 实现）
             abiFilters 'arm64-v8a'

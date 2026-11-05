@@ -118,8 +118,10 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private View statusDot;
     private TextView detail;
     private LinearLayout controls;
+    private TextView worksBtn;
     private WebView web;
     private Button stitchBtn;
+    private PanoGalleryView gallery;
     private final PanoHostBridge bridge = new PanoHostBridge();
     private boolean webLoaded;
 
@@ -933,6 +935,20 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             }
         });
 
+        worksBtn = new TextView(this);
+        worksBtn.setText("作品");
+        worksBtn.setTextSize(11);
+        worksBtn.setTextColor(getColor(R.color.lib_text_secondary));
+        worksBtn.setBackgroundResource(R.drawable.lib_chip);
+        worksBtn.setPadding(dp(14), dp(9), dp(14), dp(9));
+        worksBtn.setOnClickListener(v -> showGallery(true));
+        FrameLayout.LayoutParams worksLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.END);
+        worksLp.rightMargin = dp(16);
+        worksLp.topMargin = dp(16);
+        root.addView(worksBtn, worksLp);
+
         controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.HORIZONTAL);
         controls.setGravity(Gravity.CENTER);
@@ -961,11 +977,29 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         // web 是后加的，会盖住状态栏和按钮；把它们提到最上层，保证全景查看时仍可点。
         detail.bringToFront();
         statusWrap.bringToFront();
+        worksBtn.bringToFront();
         controls.bringToFront();
 
         stitchBtn.setOnClickListener(v -> doStitch());
 
+        // 首页「最近作品」瀑布流：启动即展示，点「开始拍摄」进入取景
+        gallery = new PanoGalleryView(this, () -> showGallery(false));
+        root.addView(gallery, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        gallery.bringToFront();
+
         return root;
+    }
+
+    private void showGallery(boolean show) {
+        if (gallery == null) {
+            return;
+        }
+        if (show) {
+            gallery.refresh();
+            gallery.bringToFront();
+        }
+        gallery.setVisibility(show ? View.VISIBLE : View.GONE);
     }
 
     /** 主行动：白底胶囊 CTA（与 libraries.dev 的按钮同款）。 */
@@ -1472,7 +1506,12 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 msg = "照片保存失败: " + t;
             }
             final String m = msg;
-            ui.post(() -> Toast.makeText(this, m, Toast.LENGTH_LONG).show());
+            ui.post(() -> {
+                Toast.makeText(this, m, Toast.LENGTH_LONG).show();
+                if (gallery != null) {
+                    gallery.refresh();   // 新成片立刻出现在首页瀑布流
+                }
+            });
         }, "photo-save").start();
     }
 
@@ -1588,6 +1627,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         setWaitingVisible(false);
         statusWrap.setVisibility(View.GONE);
         detail.setVisibility(View.GONE);
+        worksBtn.setVisibility(View.GONE);
         controls.setVisibility(View.GONE);
         yaw = 180f;
         pitch = 0f;
@@ -1611,6 +1651,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private void closeViewer() {
         web.setVisibility(View.GONE);
         statusWrap.setVisibility(View.VISIBLE);
+        worksBtn.setVisibility(View.VISIBLE);
         controls.setVisibility(View.VISIBLE);
         ui.removeCallbacks(liveStitch);
         if (cameraView != null) {
