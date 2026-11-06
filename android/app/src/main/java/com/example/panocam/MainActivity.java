@@ -178,6 +178,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private volatile EquirectRecorder recorder;      // 录制中的 2:1 拼接原图编码器
     private volatile int effectivePreviewW = PREVIEW_OUT_W;
     private volatile double lastPreviewRoundMs;
+    private volatile long lastCpuPreviewAtNs;
     private Runnable pendingGesture;                 // 手势触发的延时动作
 
     private volatile int[] equirectPixels;
@@ -1758,6 +1759,13 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         return !recording && !pageReady;
     }
 
+    static boolean shouldEncodeCpuPreview(boolean pageReady, boolean recording, int previewTick,
+                                          int intervalMs, long nowNs, long lastPreviewAtNs) {
+        return pageReady && (!recording || (previewTick & 1) == 0)
+                && (intervalMs <= 0 || lastPreviewAtNs <= 0
+                || nowNs - lastPreviewAtNs >= intervalMs * 1_000_000L);
+    }
+
     /** GPU 路径：GL 线程拼好一帧后回调，这里只做 JPEG 编码 + 推给网页。 */
     private void handleGlPreview(final int[] eq, final int ow, final int oh) {
         final long t0 = Perf.t();
@@ -1869,9 +1877,14 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                         Perf.recFrameTick();
                     }
                     // 预览按页面选择的预览宽度推送；录制时每 2 帧推一次，省掉一半预览编码开销
-                    boolean pushPreview = bridge.canStitch()
-                            && (!recording || ((recPreviewTick++ & 1) == 0));
+                    boolean pageReady = bridge.canStitch();
+                    int previewTick = recPreviewTick;
+                    if (recording && pageReady) recPreviewTick++;
+                    long previewNow = System.nanoTime();
+                    boolean pushPreview = shouldEncodeCpuPreview(pageReady, recording, previewTick,
+                            previewPolicy.intervalMs(recording), previewNow, lastCpuPreviewAtNs);
                     if (pushPreview) {
+                        lastCpuPreviewAtNs = previewNow;
                         long e0 = Perf.t();
                         String url = encodeJpeg(eq, ow, oh, effectivePreviewW);
                         Perf.end(Perf.ENCODE, e0);          // Bitmap 拷贝 + 缩放 + JPEG + base64
