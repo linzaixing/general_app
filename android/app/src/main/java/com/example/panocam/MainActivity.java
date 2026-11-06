@@ -28,6 +28,7 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.net.Uri;
 import android.provider.MediaStore;
 import android.provider.Settings;
@@ -123,6 +124,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private Button stitchBtn;
     private PanoGalleryView gallery;
     private final PanoHostBridge bridge = new PanoHostBridge();
+    private final PreviewLoadPolicy previewPolicy = new PreviewLoadPolicy();
     private boolean webLoaded;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -174,6 +176,8 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private long photoArmedAt;
     private long lastPhotoAt;
     private volatile EquirectRecorder recorder;      // 录制中的 2:1 拼接原图编码器
+    private volatile int effectivePreviewW = PREVIEW_OUT_W;
+    private volatile double lastPreviewRoundMs;
     private Runnable pendingGesture;                 // 手势触发的延时动作
 
     private volatile int[] equirectPixels;
@@ -182,6 +186,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private int[] stitchBuf;
     private int[] stitchBufHi;
     private int[] photoBuf;
+    private final PreviewEncoder previewEncoder = new PreviewEncoder();
     private int recPreviewTick;      // CPU 兜底录制时控制预览推送频率（每 2 帧推一次）
     private int eqW, eqH;
     /** 页面「画质」选择：预览拼接宽度、保存原图宽度（均为 2:1 的宽）。 */
@@ -235,7 +240,12 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
             @Override
             public void onPhotoFrame(int[] eq, int ow, int oh) {
-                saveEquirectPhoto(eq, ow, oh);
+                saveEquirectPhoto(eq, ow, oh, stabilize ? rollDeg : 0f);
+            }
+
+            @Override
+            public void onPhotoFrame(int[] eq, int ow, int oh, float appliedRollDegrees) {
+                saveEquirectPhoto(eq, ow, oh, 0f);
             }
 
             @Override
@@ -720,7 +730,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             previewW = w;
             previewH = h;
             cameraView.setCameraSize(w, h);
-            cameraView.setSizes(previewOutW);
+            applyPreviewPolicy();
             ui.post(() -> {
                 if (cameraView != null) {
                     cameraView.setAspect(w, h);
@@ -840,6 +850,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         cameraView = new GlPreview(this);
+        cameraView.setPreviewEligibility(bridge::canStitch);
         cameraContainer.addView(cameraView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER));
         cameraView.setAspect(2, 1);
@@ -987,6 +998,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         root.addView(gallery, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         gallery.bringToFront();
+        cameraView.setRawDisplayEnabled(false);
 
         return root;
     }
@@ -995,6 +1007,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         if (gallery == null) {
             return;
         }
+        if (cameraView != null) cameraView.setRawDisplayEnabled(!show);
         if (show) {
             gallery.refresh();
             gallery.bringToFront();
@@ -1100,6 +1113,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             frameConsumed = true;
             long pushed = pushedAtNano;
             if (pushed > 0) {
+                lastPreviewRoundMs = Math.max(0, System.nanoTime() - pushed) / 1_000_000.0;
                 Perf.end(Perf.ROUND, pushed);   // 帧推给页面 -> 页面解码并上传纹理完成
             }
         }
@@ -1179,7 +1193,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         public void setQuality(int prevW, int saveW) {
             previewOutW = Math.max(512, Math.min(1536, prevW));
             saveOutW = Math.max(512, Math.min(2784, saveW));
-            cameraView.setSizes(previewOutW);
+            applyPreviewPolicy();
             runOnUiThread(MainActivity.this::updateStatus);
         }
 
@@ -1365,10 +1379,12 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 cameraView.setRecorder(rec);
                 cameraView.setRoll(stabilize ? rollDeg : 0f);
             }
+            applyPreviewPolicy();
             onRecordState(true, null, null);
         } catch (Throwable t) {
             Log.e("PanoCam", "start recorder failed", t);
             recorder = null;
+            applyPreviewPolicy();
             onRecordState(false, null, "录制启动失败: " + t);
         }
     }
@@ -1376,6 +1392,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private void stopRecording() {
         final EquirectRecorder rec = recorder;
         recorder = null;
+        applyPreviewPolicy();
         if (rec == null) {
             return;
         }
@@ -1409,9 +1426,10 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             return;
         }
         sendToPage("window.panoOnEvent && panoOnEvent('shutter','')");
+        final float shutterRoll = stabilize ? rollDeg : 0f;
         if (cameraView.isStitchOk()) {
             // GPU 直接按保存尺寸拼接后回读，省掉 Bitmap 再上传纹理的一次往返
-            cameraView.requestPhoto(hiOutW());
+            cameraView.requestPhoto(hiOutW(), shutterRoll);
             return;
         }
         // 回退：按相机原生分辨率回读一帧，CPU/NEON 拼接
@@ -1436,7 +1454,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                     throw new IllegalStateException("拼接失败");
                 }
                 photoBuf = eq;   // 复用输出缓冲，避免每次拍照都分配 8~13MB
-                saveEquirectPhoto(eq, ow, oh);
+                saveEquirectPhoto(eq, ow, oh, shutterRoll);
             } catch (Throwable t) {
                 final String m = "照片保存失败: " + t;
                 ui.post(() -> Toast.makeText(this, m, Toast.LENGTH_LONG).show());
@@ -1446,12 +1464,16 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     /** 把拼接好的 2:1 等距原图（按防抖角度摆正）写进相册 Pictures/PanoCam。 */
     private void saveEquirectPhoto(int[] eqIn, int ow, int oh) {
+        saveEquirectPhoto(eqIn, ow, oh, stabilize ? rollDeg : 0f);
+    }
+
+    private void saveEquirectPhoto(int[] eqIn, int ow, int oh, float cpuRollDegrees) {
         final long pStart = Perf.t();
         new Thread(() -> {
             String msg;
             try {
                 int[] eq = eqIn;
-                float rollRad = stabilize ? (float) Math.toRadians(rollDeg) : 0f;
+                float rollRad = (float) Math.toRadians(cpuRollDegrees);
                 long rt = Perf.t();
                 if (rollRad != 0f) {
                     eq = PanoStitcher.rotateEquirect(eq, ow, oh, rollRad);
@@ -1559,7 +1581,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     private int[] capturePreview(int[] sizeOut) {
         // 回读分辨率不必高于预览拼接宽度：1024 档回读 1024x512，比固定 1280x640 省一半多
-        int w = Math.min(CAPTURE_W, Math.max(640, previewOutW));
+        int w = Math.min(CAPTURE_W, Math.max(640, effectivePreviewW));
         if ((w & 1) != 0) {
             w--;
         }
@@ -1633,6 +1655,8 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         pitch = 0f;
         bridge.resetGyro();
         viewerVisible = true;
+        applyPreviewPolicy();
+        cameraView.setRawDisplayEnabled(false);
         resetGestures();
         liveFps = 0;
         liveFrameMs = 0;
@@ -1656,10 +1680,12 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         ui.removeCallbacks(liveStitch);
         if (cameraView != null) {
             cameraView.setPreviewEnabled(false);
+            cameraView.setRawDisplayEnabled(true);
         }
         hint.setVisibility(View.VISIBLE);
         setWaitingVisible(!previewing);
         viewerVisible = false;
+        applyPreviewPolicy();
         resetGestures();
         cancelPendingGesture();
         if (recorder != null) {
@@ -1676,7 +1702,9 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             if (cameraView != null && cameraView.isStitchOk()) {
                 return;   // GPU 路径由 GL 线程回调驱动
             }
-            if (!bridge.canStitch()) {
+            EquirectRecorder active = recorder;
+            boolean recording = active != null && active.isActive();
+            if (shouldWaitForPreviewConsumer(recording, bridge.canStitch())) {
                 // 上一帧还在 WebView 里解码/上传，等它消费完再拼，避免堆帧
                 ui.postDelayed(this, 24);
                 return;
@@ -1690,6 +1718,46 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         ui.postDelayed(liveStitch, delay);
     }
 
+    private void applyPreviewPolicy() {
+        int width = previewPolicy.width(previewOutW);
+        boolean recording = recorder != null && recorder.isActive();
+        effectivePreviewW = width;
+        if (cameraView != null) {
+            cameraView.setSizes(width);
+            cameraView.setPreviewIntervalMs(viewerVisible
+                    ? previewPolicy.intervalMs(recording) : 0);
+        }
+        String report = "{\"preview\":" + previewOutW + ",\"save\":" + saveOutW
+                + ",\"effectivePreview\":" + width + "}";
+        sendToPage("window.panoOnEvent && panoOnEvent('quality'," + JSONObject.quote(report) + ")");
+    }
+
+    private void samplePreviewLoad(double encodeMs) {
+        int thermal = 0;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                PowerManager manager = (PowerManager) getSystemService(POWER_SERVICE);
+                if (manager != null) thermal = manager.getCurrentThermalStatus();
+            } catch (Throwable ignored) {
+            }
+        }
+        boolean recording = recorder != null && recorder.isActive();
+        int oldWidth = previewPolicy.width(previewOutW);
+        int oldQuality = previewPolicy.quality();
+        int oldInterval = previewPolicy.intervalMs(recording);
+        previewPolicy.sample(System.nanoTime(), thermal, encodeMs, lastPreviewRoundMs,
+                recording ? 0 : liveFps);
+        if (oldWidth != previewPolicy.width(previewOutW)
+                || oldQuality != previewPolicy.quality()
+                || oldInterval != previewPolicy.intervalMs(recording)) {
+            applyPreviewPolicy();
+        }
+    }
+
+    static boolean shouldWaitForPreviewConsumer(boolean recording, boolean pageReady) {
+        return !recording && !pageReady;
+    }
+
     /** GPU 路径：GL 线程拼好一帧后回调，这里只做 JPEG 编码 + 推给网页。 */
     private void handleGlPreview(final int[] eq, final int ow, final int oh) {
         final long t0 = Perf.t();
@@ -1701,7 +1769,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 EquirectRecorder rec = recorder;
                 long e0 = Perf.t();
                 // 录制中预览已经降到页面宽度，避免重复缩放大图
-                String url = encodeJpeg(eq, ow, oh, rec != null ? previewOutW : 0);
+                String url = encodeJpeg(eq, ow, oh, effectivePreviewW);
                 Perf.end(Perf.ENCODE, e0);          // Bitmap 拷贝 + 缩放 + JPEG + base64
                 if (url != null) {
                     Perf.SIZE.add(Math.max(1L, (url.length() - 24) * 3L / 4L / 1024L) * 1000L);
@@ -1715,6 +1783,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                         bridge.pushRaw(encodeJpeg(raw, 960, 480, 0));
                     }
                 }
+                samplePreviewLoad((System.nanoTime() - e0) / 1e6);
                 long t4 = Perf.t();
                 double cost = (t4 - t0) / 1e6;
                 if (lastLiveFrameAt > 0) {
@@ -1760,7 +1829,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         long t0 = System.nanoTime();
         // 录制时按相机原生分辨率回读并拼高分辨率原图，预览仍降到页面上限
         EquirectRecorder rec = recorder;
-        final boolean recording = rec != null;
+        final boolean recording = rec != null && rec.isActive();
         int[] size = new int[2];
         int[] frame = recording ? captureHighRes(size) : capturePreview(size);
         long t1 = System.nanoTime();
@@ -1773,7 +1842,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         final int fw = size[0];
         final int fh = size[1];
         // 尺寸跟编码器走：录制中改画质只影响下一次录制，不会把这一条视频写坏
-        final int ow = recording ? rec.width() : previewOutW;
+        final int ow = recording ? rec.width() : effectivePreviewW;
         final int oh = ow / 2;
         // 防抖：把这一帧的重力 roll 一起带进拼接线程，预览/录像用的是同一时刻的角度
         final float rollRad = stabilize ? (float) Math.toRadians(rollDeg) : 0f;
@@ -1800,16 +1869,19 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                         Perf.recFrameTick();
                     }
                     // 预览按页面选择的预览宽度推送；录制时每 2 帧推一次，省掉一半预览编码开销
-                    long e0 = Perf.t();
-                    boolean pushPreview = !recording || ((recPreviewTick++ & 1) == 0);
-                    String url = pushPreview
-                            ? encodeJpeg(eq, ow, oh, recording ? previewOutW : 0) : null;
-                    Perf.end(Perf.ENCODE, e0);          // Bitmap 拷贝 + 缩放 + JPEG + base64
-                    if (url != null) {
-                        Perf.SIZE.add(Math.max(1L, (url.length() - 24) * 3L / 4L / 1024L) * 1000L);
-                        long p0 = Perf.t();
-                        bridge.pushFrame(url);
-                        Perf.end(Perf.PUSH, p0);
+                    boolean pushPreview = bridge.canStitch()
+                            && (!recording || ((recPreviewTick++ & 1) == 0));
+                    if (pushPreview) {
+                        long e0 = Perf.t();
+                        String url = encodeJpeg(eq, ow, oh, effectivePreviewW);
+                        Perf.end(Perf.ENCODE, e0);          // Bitmap 拷贝 + 缩放 + JPEG + base64
+                        if (url != null) {
+                            Perf.SIZE.add(Math.max(1L, (url.length() - 24) * 3L / 4L / 1024L) * 1000L);
+                            long p0 = Perf.t();
+                            bridge.pushFrame(url);
+                            Perf.end(Perf.PUSH, p0);
+                        }
+                        samplePreviewLoad((System.nanoTime() - e0) / 1e6);
                     }
                 }
                 long t4 = System.nanoTime();
@@ -1853,17 +1925,10 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     /** int[] ARGB -> JPEG data URL；maxW>0 时按宽度等比缩小。 */
     private String encodeJpeg(int[] px, int w, int h, int maxW) {
-        Bitmap bmp = Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888);
-        if (maxW > 0 && w > maxW) {
-            Bitmap small = Bitmap.createScaledBitmap(bmp, maxW, h * maxW / w, true);
-            bmp.recycle();
-            bmp = small;
-        }
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        bmp.compress(Bitmap.CompressFormat.JPEG, 85, bos);
-        bmp.recycle();
+        byte[] jpeg = previewEncoder.encode(px, w, h, maxW, previewPolicy.quality());
+        if (jpeg == null) return null;
         return "data:image/jpeg;base64,"
-                + Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP);
+                + Base64.encodeToString(jpeg, Base64.NO_WRAP);
     }
 
     // ---------------- 传感器 ----------------

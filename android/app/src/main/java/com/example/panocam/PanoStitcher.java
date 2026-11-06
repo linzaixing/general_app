@@ -30,7 +30,37 @@ public final class PanoStitcher {
      * 第二个镜头的 cx 若超过半宽则换算为右半幅局部坐标。
      */
     private static float[][] parseLenses(int frameW) {
-        String[] t = OFFSET.split("_");
+        return cachedLenses(frameW).copy();
+    }
+
+    private static final String[] OFFSET_VALUES = OFFSET.split("_");
+    private static final java.util.Map<Integer, Lenses> LENS_CACHE =
+            new java.util.LinkedHashMap<Integer, Lenses>(8, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(java.util.Map.Entry<Integer, Lenses> entry) {
+                    return size() > 8;
+                }
+            };
+
+    /** Immutable shared values. No caller can mutate cached arrays. Rotations are radians here. */
+    static final class Lenses {
+        final float cx0, cy0, r0, roll0, cx1, cy1, r1, roll1;
+        private final float degrees0, degrees1;
+        Lenses(float[][] values) {
+            cx0 = values[0][0]; cy0 = values[0][1]; r0 = values[0][2];
+            cx1 = values[1][0]; cy1 = values[1][1]; r1 = values[1][2];
+            degrees0 = values[0][3]; degrees1 = values[1][3];
+            roll0 = (float) Math.toRadians(degrees0);
+            roll1 = (float) Math.toRadians(degrees1);
+        }
+        float[][] copy() {
+            return new float[][]{{cx0, cy0, r0, degrees0}, {cx1, cy1, r1, degrees1}};
+        }
+    }
+
+    static synchronized Lenses cachedLenses(int frameW) {
+        Lenses cached = LENS_CACHE.get(frameW);
+        if (cached != null) { return cached; }
+        String[] t = OFFSET_VALUES;
         int n = Integer.parseInt(t[0]);
         float originW = Float.parseFloat(t[1 + 6 * n]);
         float scale = frameW / originW;
@@ -50,7 +80,9 @@ public final class PanoStitcher {
             lens[i][2] = r;
             lens[i][3] = roll;
         }
-        return lens;
+        Lenses result = new Lenses(lens);
+        LENS_CACHE.put(frameW, result);
+        return result;
     }
 
     /** GPU 拼接用：暴露按帧宽缩放后的镜头参数 {cx, cy, r, roll°}。 */

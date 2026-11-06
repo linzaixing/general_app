@@ -314,6 +314,7 @@ try {
   const q = JSON.parse(localStorage.getItem(QUALITY_KEY) || 'null');
   if (q && q.preview && q.save) quality = q;
 } catch (e) {}
+let effectivePreview = quality.preview;
 // 防抖默认开启：预览和保存的原图都按重力 roll 锁定地平线；关掉则用相机原始朝向
 let stabilize = localStorage.getItem(STAB_KEY) !== '0';
 
@@ -664,9 +665,10 @@ function resize() {
   let w = Math.max(1, Math.round(canvas.clientWidth * dpr));
   let h = Math.max(1, Math.round(canvas.clientHeight * dpr));
   // 预览分辨率上限：网页端控制渲染清晰度/开销，App 端另由原生拼接尺寸决定
-  if (w > quality.preview) {
-    const k = quality.preview / w;
-    w = quality.preview;
+  const previewLimit = Math.min(quality.preview, effectivePreview);
+  if (w > previewLimit) {
+    const k = previewLimit / w;
+    w = previewLimit;
     h = Math.max(1, Math.round(h * k));
   }
   if (canvas.width !== w || canvas.height !== h) {
@@ -1292,6 +1294,15 @@ window.panoOnEvent = function (name, msg) {
     const el = document.getElementById('fpsHud');
     el.textContent = msg;    // 例：18.2 fps · 54 ms
     el.classList.add('on');
+  } else if (name === 'quality') {
+    try {
+      const report = typeof msg === 'string' ? JSON.parse(msg) : msg;
+      const width = report && (report.effectivePreview == null ? report.preview : report.effectivePreview);
+      if (Number.isSafeInteger(width) && width >= 512 && width <= quality.preview) {
+        effectivePreview = width;
+        resize();
+      }
+    } catch (e) {}
   } else if (name === 'toast' && msg) {
     toast(msg);
   }
@@ -1308,6 +1319,8 @@ const qDlg = document.getElementById('qDlg');
 function applyQuality(prevW, saveW) {
   if (prevW) quality.preview = prevW;
   if (saveW) quality.save = saveW;
+  effectivePreview = quality.preview;
+  resize();
   localStorage.setItem(QUALITY_KEY, JSON.stringify(quality));
   document.querySelectorAll('#qPrev button').forEach(b =>
     b.classList.toggle('on', Number(b.dataset.w) === quality.preview));

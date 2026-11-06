@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const zlib = require('node:zlib');
+const { execFileSync } = require('node:child_process');
 
 let playwright;
 try { playwright = require('playwright'); }
@@ -40,7 +41,9 @@ before(async () => {
   browser = await playwright.chromium.launch({ headless: true, args: [
     '--no-sandbox', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader',
   ] });
-  const html = fs.readFileSync(path.resolve(__dirname, '../pano_demo.html'));
+  const html = process.env.PANO_BASELINE
+    ? execFileSync('git', ['show', `${process.env.PANO_BASELINE}:pano_demo.html`], { cwd: path.resolve(__dirname, '..') })
+    : fs.readFileSync(path.resolve(__dirname, '../pano_demo.html'));
   server = http.createServer((req, res) => {
     if (req.url.startsWith('/pano_demo.html')) {
       res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.end(html);
@@ -111,4 +114,13 @@ test('same-size image updates reuse storage and cache anisotropy lookup', async 
   assert.equal(resized.allocations, reused.allocations + 1);
   assert.deepEqual(resized.dimensions, [128, 64]);
   assert.equal(resized.anisotropyQueries, before.anisotropyQueries);
+});
+
+test('effective preview scaling does not overwrite the user-selected quality', async () => {
+  await page.evaluate(() => panoOnEvent('quality', {
+    preview: 1536, save: 2784, effectivePreview: 640,
+  }));
+  await page.waitForFunction(() => document.querySelector('#c').width === 640);
+  assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('pano-quality-v4'))),
+    { preview: 1536, save: 2784 });
 });
