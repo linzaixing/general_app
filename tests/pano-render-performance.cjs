@@ -136,3 +136,60 @@ test('poster export restores a drawable canvas after resizing it for export', as
   });
   await page.waitForFunction(count => __gpu.draws > count, posterDrawCount);
 });
+
+test('viewer uses a desktop utility rail and a no-overflow mobile control deck', async () => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const desktop = await page.evaluate(() => ({
+    rail: document.querySelector('.dock').getBoundingClientRect(),
+    railTools: document.querySelector('.chips').getBoundingClientRect(),
+    captureDeck: !!document.querySelector('.captureDeck'),
+  }));
+  assert.ok(desktop.rail.width < 100);
+  assert.ok(desktop.railTools.height > desktop.railTools.width * 3);
+  assert.equal(desktop.captureDeck, true);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobile = await page.evaluate(() => ({
+    tools: getComputedStyle(document.querySelector('.chips')).flexDirection,
+    pageWidth: document.documentElement.scrollWidth,
+    viewportWidth: innerWidth,
+    captureDeck: document.querySelector('.captureDeck').getBoundingClientRect(),
+  }));
+  assert.equal(mobile.tools, 'row');
+  assert.equal(mobile.pageWidth, mobile.viewportWidth);
+  assert.ok(mobile.captureDeck.width <= mobile.viewportWidth - 24);
+});
+
+test('panorama exposes keyboard view controls and announces the selected projection', async () => {
+  const canvas = page.locator('#c');
+  assert.equal(await canvas.getAttribute('tabindex'), '0');
+  assert.ok(await canvas.getAttribute('aria-describedby'));
+  await canvas.focus();
+  const before = await page.evaluate(() => target.yaw);
+  await canvas.press('ArrowRight');
+  assert.notEqual(await page.evaluate(() => target.yaw), before);
+  await page.locator('.bar button[data-mode="1"]').click();
+  assert.equal(await page.locator('.bar button[data-mode="1"]').getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.locator('.bar button[data-mode="0"]').getAttribute('aria-pressed'), 'false');
+});
+
+test('quality dialog traps focus, closes on Escape, and keeps option targets touch-sized', async () => {
+  await page.locator('#btnQuality').click();
+  assert.equal(await page.evaluate(() => qDlg.contains(document.activeElement)), true);
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => !qDlg.classList.contains('on'));
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'btnQuality');
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator('#btnQuality').click();
+  const heights = await page.locator('.seg button').evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().height));
+  assert.ok(heights.length > 0 && heights.every(height => height >= 44), JSON.stringify(heights));
+});
+
+test('reduced motion disables resolution-option transitions', async () => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.locator('#btnQuality').click();
+  const durations = await page.locator('.seg button').evaluateAll(nodes =>
+    nodes.map(node => parseFloat(getComputedStyle(node).transitionDuration)));
+  assert.ok(durations.every(duration => duration <= 0.001), JSON.stringify(durations));
+});
