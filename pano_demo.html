@@ -1125,6 +1125,7 @@ async function exportPoster() {
     64, H - 24);
 
   canvas.width = oldW; canvas.height = oldH;
+  lastRenderSignature = null;
   resize();
 
   if (HOST) {

@@ -124,3 +124,15 @@ test('effective preview scaling does not overwrite the user-selected quality', a
   assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('pano-quality-v4'))),
     { preview: 1536, save: 2784 });
 });
+
+test('poster export restores a drawable canvas after resizing it for export', async () => {
+  await page.waitForTimeout(700);
+  const before = await page.evaluate(() => __gpu.draws);
+  await page.waitForTimeout(300);
+  assert.equal(await page.evaluate(() => __gpu.draws), before);
+  const posterDrawCount = await page.evaluate(async () => {
+    await exportPoster();
+    return __gpu.draws;
+  });
+  await page.waitForFunction(count => __gpu.draws > count, posterDrawCount);
+});
