@@ -489,6 +489,11 @@ if (gl) {
 }
 
 const uni = {};
+let textureWidth = 0, textureHeight = 0, textureVersion = 0;
+let anisoExtension = null, anisoCap = 1;
+let lastRenderSignature = null;
+const renderSignature = { version: -1, width: 0, height: 0, mode: 0,
+  yaw: 0, pitch: 0, fov: 0, zoom: 0, roll: 0, grid: false, seam: false };
 if (gl) {
   ['uRes', 'uOrigin', 'uYaw', 'uPitch', 'uFov', 'uZoom', 'uRoll', 'uGrid', 'uSeam',
    'uMode', 'uTex'].forEach(n => {
@@ -511,8 +516,15 @@ if (gl) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER,
     HOST ? gl.LINEAR : gl.LINEAR_MIPMAP_LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  anisoExtension = gl.getExtension('EXT_texture_filter_anisotropic');
+  anisoCap = anisoExtension
+    ? Math.min(gl.getParameter(anisoExtension.MAX_TEXTURE_MAX_ANISOTROPY_EXT), 8) : 1;
+  if (anisoExtension) {
+    gl.texParameterf(gl.TEXTURE_2D, anisoExtension.TEXTURE_MAX_ANISOTROPY_EXT, anisoCap);
+  }
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
     new Uint8Array([0, 0, 0, 255]));
+  textureWidth = textureHeight = 1;
 }
 
 const img = new Image();
@@ -526,14 +538,19 @@ function uploadTexture(image) {
   }
   const u0 = performance.now();
   gl.bindTexture(gl.TEXTURE_2D, tex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
-  if (!HOST) gl.generateMipmap(gl.TEXTURE_2D);   // 实时帧不做 mipmap，省掉每帧开销
-  const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
-  if (aniso) {
-    const max = gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT);
-    gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(max, 8));
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
+  if (textureWidth === width && textureHeight === height) {
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, image);
+  } else {
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+    textureWidth = width;
+    textureHeight = height;
   }
+  if (!HOST) gl.generateMipmap(gl.TEXTURE_2D);   // 实时帧不做 mipmap，省掉每帧开销
   perfAdd('upload', performance.now() - u0);
+  textureVersion++;
+  lastRenderSignature = null;
   ready = true;
   if (HOST && HOST.frameDone) HOST.frameDone();   // 通知 App 可以拼下一帧了
 }
@@ -655,6 +672,7 @@ function resize() {
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w;
     canvas.height = h;
+    lastRenderSignature = null;
   }
   return dpr;
 }
@@ -685,8 +703,18 @@ function drawScene(w, h, cam, opts) {
 }
 
 function draw() {
+  const s = renderSignature;
+  if (lastRenderSignature && s.version === textureVersion && s.width === canvas.width &&
+      s.height === canvas.height && s.mode === mode && s.yaw === cur.yaw && s.pitch === cur.pitch &&
+      s.fov === cur.fov && s.zoom === cur.zoom && s.roll === cur.roll &&
+      s.grid === gridOn && s.seam === seamOn) return false;
   resize();
   drawScene(canvas.width, canvas.height, cur);
+  s.version = textureVersion; s.width = canvas.width; s.height = canvas.height; s.mode = mode;
+  s.yaw = cur.yaw; s.pitch = cur.pitch; s.fov = cur.fov; s.zoom = cur.zoom; s.roll = cur.roll;
+  s.grid = gridOn; s.seam = seamOn;
+  lastRenderSignature = s;
+  return true;
 }
 
 // --- 覆盖层更新 -------------------------------------------------------------
@@ -1364,6 +1392,10 @@ function pollHost(now) {
 
 // --- 主循环 -----------------------------------------------------------------
 let last = performance.now();
+function smooth(value, destination, k) {
+  const next = value + (destination - value) * k;
+  return Math.abs(destination - next) < 0.000001 ? destination : next;
+}
 function frame(now) {
   const rafDt = now - last;
   const dt = Math.min(rafDt / 1000, 0.1);
@@ -1383,19 +1415,18 @@ function frame(now) {
   }
 
   const k = 1 - Math.exp(-dt / SMOOTH_TAU);
-  cur.yaw += (target.yaw - cur.yaw) * k;
-  cur.pitch += (target.pitch - cur.pitch) * k;
-  cur.fov += (target.fov - cur.fov) * k;
-  cur.zoom += (target.zoom - cur.zoom) * k;
-  cur.roll += (rollTarget - cur.roll) * k;
+  cur.yaw = smooth(cur.yaw, target.yaw, k);
+  cur.pitch = smooth(cur.pitch, target.pitch, k);
+  cur.fov = smooth(cur.fov, target.fov, k);
+  cur.zoom = smooth(cur.zoom, target.zoom, k);
+  cur.roll = smooth(cur.roll, rollTarget, k);
 
   if (huntOn) { huntElapsed = performance.now() - huntStart; updateHud(); }
   updateRecUi();
   updateOverlays();
   if (ready) {
     const d0 = performance.now();
-    draw();
-    if (HOST) perfAdd('draw', performance.now() - d0);   // WebGL 提交耗时（CPU 侧）
+    if (draw() && HOST) perfAdd('draw', performance.now() - d0);   // WebGL 提交耗时（CPU 侧）
   }
   requestAnimationFrame(frame);
 }
