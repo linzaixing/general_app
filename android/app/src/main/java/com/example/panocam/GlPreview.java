@@ -18,6 +18,9 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.util.ArrayDeque;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.function.BooleanSupplier;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -39,6 +42,8 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
     private static final String TAG = "PanoPerf";
     /** EGL_RECORDABLE_ANDROID：录制必须，否则 MediaCodec 的输入 Surface 可能建不起来。 */
     private static final int EGL_RECORDABLE_ANDROID = 0x3142;
+    private static final float HALF_FOV_RAD = (float) Math.toRadians(PanoStitcher.FOV_DEG / 2.0);
+    private static final float BLEND_RAD = PanoStitcher.blendRad();
 
     public interface Listener {
         /** 相机可用的 SurfaceTexture（必须在相机线程里 setPreviewTexture）。 */
@@ -52,6 +57,11 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
 
         /** 拍照/手动拼接请求的结果（ARGB int[]，GL 线程回调，数组归调用方所有）。 */
         void onPhotoFrame(int[] eq, int ow, int oh);
+
+        /** Pixels already include this shutter-time roll; callers must not rotate them again. */
+        default void onPhotoFrame(int[] eq, int ow, int oh, float appliedRollDegrees) {
+            onPhotoFrame(eq, ow, oh);
+        }
 
         void onGlError(String msg);
     }
@@ -164,8 +174,14 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
 
     private volatile int viewW = 1, viewH = 1;
     private volatile boolean previewEnabled;
+    private volatile boolean rawDisplayEnabled = true;
+    private volatile BooleanSupplier previewEligibility = () -> true;
+    private volatile int previewIntervalMs;
+    private volatile long lastPreviewAtNs;
     private volatile boolean previewBusy;
-    private volatile int pendingPhotoW;
+    private final Object photoLock = new Object();
+    private int pendingPhotoW;
+    private float pendingPhotoRoll;
     private volatile int previewW = 1536;
     private volatile boolean stitchOk;
     private volatile float rollDeg;
@@ -176,10 +192,30 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
     private int ratioW = 2, ratioH = 1;
 
     private int progRawShow, progRawRead, progErpRec, progErpRead, progSelf;
-    private int uniSt, uniSrc;
+    private final Map<Integer, Locations> locations = new HashMap<>();
+    private PanoStitcher.Lenses lenses;
+    private int lensSourceW;
     private int[] previewBuf;
     private FloatBuffer showPos;
     private int showPosW, showPosH;
+
+    private static final class Locations {
+        final int pos, tex, src, st, srcSize, outSize, fov, blend, lens0, lens1, roll, flip;
+        Locations(int program, boolean erp) {
+            pos = GLES20.glGetAttribLocation(program, "aPos");
+            tex = GLES20.glGetAttribLocation(program, "aTex");
+            src = GLES20.glGetUniformLocation(program, "uSrc");
+            st = GLES20.glGetUniformLocation(program, "uST");
+            srcSize = erp ? GLES20.glGetUniformLocation(program, "uSrcSize") : -1;
+            outSize = erp ? GLES20.glGetUniformLocation(program, "uOutSize") : -1;
+            fov = erp ? GLES20.glGetUniformLocation(program, "uHalfFov") : -1;
+            blend = erp ? GLES20.glGetUniformLocation(program, "uBlend") : -1;
+            lens0 = erp ? GLES20.glGetUniformLocation(program, "uLens0") : -1;
+            lens1 = erp ? GLES20.glGetUniformLocation(program, "uLens1") : -1;
+            roll = erp ? GLES20.glGetUniformLocation(program, "uRoll") : -1;
+            flip = erp ? GLES20.glGetUniformLocation(program, "uFlipY") : -1;
+        }
+    }
 
     public GlPreview(Context context) {
         super(context);
@@ -221,6 +257,23 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
         }
     }
 
+    /** Keep latching camera frames but skip the covered raw-view draw and window swap. */
+    public void setRawDisplayEnabled(boolean on) {
+        rawDisplayEnabled = on;
+        requestFrame();
+    }
+
+    /** Checked before preview stitching/readback so backpressure avoids the expensive GPU work. */
+    public void setPreviewEligibility(BooleanSupplier eligibility) {
+        previewEligibility = eligibility == null ? () -> true : eligibility;
+    }
+
+    /** Rate-limit only page previews; recording and camera texture latching remain uncapped. */
+    public void setPreviewIntervalMs(int intervalMs) {
+        previewIntervalMs = Math.max(0, Math.min(1000, intervalMs));
+        requestFrame();
+    }
+
     /** 网页消费完一帧后调用，允许渲染下一帧预览。 */
     public void releasePreview() {
         previewBusy = false;
@@ -235,7 +288,15 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
 
     /** 请求拍一帧保存尺寸的等距全景。 */
     public void requestPhoto(int outW) {
-        pendingPhotoW = outW;
+        requestPhoto(outW, 0f);
+    }
+
+    /** Snapshot stabilization at the shutter so GPU output avoids a later CPU rotation. */
+    public void requestPhoto(int outW, float rollDegrees) {
+        synchronized (photoLock) {
+            pendingPhotoW = outW;
+            pendingPhotoRoll = rollDegrees;
+        }
         requestFrame();
     }
 
@@ -502,8 +563,10 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
         if (progRawShow == 0 || progRawRead == 0 || progErpRec == 0 || progErpRead == 0) {
             return false;
         }
-        uniSt = GLES20.glGetUniformLocation(progRawShow, "uST");
-        uniSrc = GLES20.glGetUniformLocation(progRawShow, "uSrc");
+        locations.put(progRawShow, new Locations(progRawShow, false));
+        locations.put(progRawRead, new Locations(progRawRead, false));
+        locations.put(progErpRec, new Locations(progErpRec, true));
+        locations.put(progErpRead, new Locations(progErpRead, true));
 
         int[] ids = new int[1];
         GLES20.glGenFramebuffers(1, ids, 0);
@@ -598,6 +661,7 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
             if (progSelf == 0) {
                 return false;
             }
+            locations.put(progSelf, new Locations(progSelf, true));
             int fw = 256, fh = 128, ow = 128, oh = 64;
             int[] frame = new int[fw * fh];
             for (int i = 0; i < frame.length; i++) {
@@ -664,6 +728,7 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
             return false;
         } finally {
             if (progSelf != 0) {
+                locations.remove(progSelf);
                 GLES20.glDeleteProgram(progSelf);
                 progSelf = 0;
             }
@@ -703,8 +768,10 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
         if (!EGL14.eglMakeCurrent(display, windowSurface, windowSurface, context)) {
             return;
         }
-        drawRawShow();
-        EGL14.eglSwapBuffers(display, windowSurface);
+        if (rawDisplayEnabled) {
+            drawRawShow();
+            EGL14.eglSwapBuffers(display, windowSurface);
+        }
 
         EquirectRecorder rec = recorder;
         if (rec != null && rec.isActive()) {
@@ -735,15 +802,24 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
             }
         }
 
-        int photoW = pendingPhotoW;
-        if (photoW > 0) {
+        int photoW;
+        float photoRoll;
+        synchronized (photoLock) {
+            photoW = pendingPhotoW;
+            photoRoll = pendingPhotoRoll;
             pendingPhotoW = 0;
-            takePhoto(photoW);
+        }
+        if (photoW > 0) {
+            takePhoto(photoW, photoRoll);
         }
 
         // 录制时预览每 4 帧推一次，剩下的算力留给编码直出
-        boolean previewDue = recorder == null || (previewTick++ & 3) == 0;
-        if (previewEnabled && !previewBusy && stitchOk && camW > 0 && previewDue) {
+        int intervalMs = previewIntervalMs;
+        long previewNow = System.nanoTime();
+        boolean previewDue = (recorder == null || (previewTick++ & 3) == 0)
+                && (intervalMs == 0 || previewNow - lastPreviewAtNs >= intervalMs * 1_000_000L);
+        if (previewEnabled && !previewBusy && stitchOk && camW > 0 && previewDue
+                && previewEligibility.getAsBoolean()) {
             int ow = previewW & ~1;
             int oh = ow / 2;
             if (ensureFbo(ow, oh)) {
@@ -756,6 +832,7 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
                 if (eq != null) {
                     previewBuf = eq;
                     previewBusy = true;
+                    lastPreviewAtNs = System.nanoTime();
                     Listener l = listener;
                     if (l != null) {
                         try {
@@ -805,15 +882,17 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
         GLES20.glUseProgram(progRawShow);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTex);
-        GLES20.glUniform1i(uniSrc, 0);
-        GLES20.glUniformMatrix4fv(uniSt, 1, false, stMat, 0);
+        Locations loc = locations.get(progRawShow);
+        GLES20.glUniform1i(loc.src, 0);
+        GLES20.glUniformMatrix4fv(loc.st, 1, false, stMat, 0);
         bindQuad(progRawShow, showPos, fitTex);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
     }
 
     private void bindQuad(int program, FloatBuffer pos, FloatBuffer tex) {
-        int aPos = GLES20.glGetAttribLocation(program, "aPos");
-        int aTex = GLES20.glGetAttribLocation(program, "aTex");
+        Locations loc = locations.get(program);
+        int aPos = loc.pos;
+        int aTex = loc.tex;
         GLES20.glEnableVertexAttribArray(aPos);
         GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, pos);
         GLES20.glEnableVertexAttribArray(aTex);
@@ -829,17 +908,12 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
         if (program == 0 || srcW <= 0 || srcH <= 0) {
             return;
         }
-        float[][] lens = PanoStitcher.lensParams(srcW);
-        int isw = GLES20.glGetUniformLocation(program, "uSrcSize");
-        int iout = GLES20.glGetUniformLocation(program, "uOutSize");
-        int ifov = GLES20.glGetUniformLocation(program, "uHalfFov");
-        int iblend = GLES20.glGetUniformLocation(program, "uBlend");
-        int il0 = GLES20.glGetUniformLocation(program, "uLens0");
-        int il1 = GLES20.glGetUniformLocation(program, "uLens1");
-        int iroll = GLES20.glGetUniformLocation(program, "uRoll");
-        int iflip = GLES20.glGetUniformLocation(program, "uFlipY");
-        int ist = GLES20.glGetUniformLocation(program, "uST");
-        int isrc = GLES20.glGetUniformLocation(program, "uSrc");
+        if (lenses == null || lensSourceW != srcW) {
+            lenses = PanoStitcher.cachedLenses(srcW);
+            lensSourceW = srcW;
+        }
+        PanoStitcher.Lenses lens = lenses;
+        Locations loc = locations.get(program);
 
         GLES20.glUseProgram(program);
         GLES20.glViewport(0, 0, ow, oh);
@@ -849,18 +923,16 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(is2d ? GLES20.GL_TEXTURE_2D
                 : GLES11Ext.GL_TEXTURE_EXTERNAL_OES, srcTex);
-        GLES20.glUniform1i(isrc, 0);
-        GLES20.glUniformMatrix4fv(ist, 1, false, stMat, 0);
-        GLES20.glUniform2f(iout, ow, oh);
-        GLES20.glUniform2f(isw, srcW, srcH);
-        GLES20.glUniform1f(ifov, (float) Math.toRadians(PanoStitcher.FOV_DEG / 2.0));
-        GLES20.glUniform1f(iblend, PanoStitcher.blendRad());
-        GLES20.glUniform4f(il0, lens[0][0], lens[0][1], lens[0][2],
-                (float) Math.toRadians(lens[0][3]));
-        GLES20.glUniform4f(il1, lens[1][0], lens[1][1], lens[1][2],
-                (float) Math.toRadians(lens[1][3]));
-        GLES20.glUniform1f(iroll, rollRad);
-        GLES20.glUniform1f(iflip, flipY);
+        GLES20.glUniform1i(loc.src, 0);
+        GLES20.glUniformMatrix4fv(loc.st, 1, false, stMat, 0);
+        GLES20.glUniform2f(loc.outSize, ow, oh);
+        GLES20.glUniform2f(loc.srcSize, srcW, srcH);
+        GLES20.glUniform1f(loc.fov, HALF_FOV_RAD);
+        GLES20.glUniform1f(loc.blend, BLEND_RAD);
+        GLES20.glUniform4f(loc.lens0, lens.cx0, lens.cy0, lens.r0, lens.roll0);
+        GLES20.glUniform4f(loc.lens1, lens.cx1, lens.cy1, lens.r1, lens.roll1);
+        GLES20.glUniform1f(loc.roll, rollRad);
+        GLES20.glUniform1f(loc.flip, flipY);
         bindQuad(program, fullPos, fullTex);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
     }
@@ -911,7 +983,7 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
         if (readback == null || readback.capacity() < w * h * 4) {
             readback = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder());
         }
-        GLES20.glFinish();
+        // GLES2 glReadPixels is synchronous and waits for the pixels it reads.
         readback.clear();
         readback.position(0);
         GLES20.glReadPixels(0, 0, w, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, readback);
@@ -922,14 +994,15 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
         return out;
     }
 
-    private void takePhoto(int outW) {
+    private void takePhoto(int outW, float rollDegrees) {
         int ow = outW & ~1;
         int oh = ow / 2;
         if (!stitchOk || camW <= 0 || !ensureFbo(ow, oh)) {
             return;
         }
         long g = Perf.t();
-        drawErp(progErpRead, camW, camH, 0f, ow, oh, 1f, cameraTex, false);
+        drawErp(progErpRead, camW, camH, (float) Math.toRadians(rollDegrees),
+                ow, oh, 1f, cameraTex, false);
         Perf.end(Perf.GPU, g);
         long r = Perf.t();
         int[] eq = readFbo(ow, oh, null);
@@ -937,7 +1010,7 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
         if (eq != null) {
             Listener l = listener;
             if (l != null) {
-                l.onPhotoFrame(eq, ow, oh);
+                l.onPhotoFrame(eq, ow, oh, rollDegrees);
             }
         }
     }
@@ -968,9 +1041,9 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
         GLES20.glUseProgram(progRawRead);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTex);
-        GLES20.glUniform1i(GLES20.glGetUniformLocation(progRawRead, "uSrc"), 0);
-        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(progRawRead, "uST"), 1, false,
-                stMat, 0);
+        Locations loc = locations.get(progRawRead);
+        GLES20.glUniform1i(loc.src, 0);
+        GLES20.glUniformMatrix4fv(loc.st, 1, false, stMat, 0);
         bindQuad(progRawRead, fullPos, fullTex);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
     }
@@ -1035,6 +1108,9 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
         fboW = fboH = 0;
         readback = null;
         stitchOk = false;
+        locations.clear();
+        lenses = null;
+        lensSourceW = 0;
         Listener l = listener;
         if (l != null) {
             l.onCameraLost();
