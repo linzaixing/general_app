@@ -5,19 +5,169 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>URDF 视窗</title>
   <style>
-    html, body { margin: 0; padding: 0; height: 100%; background: #12161c; overflow: hidden; }
+    :root {
+      color-scheme: dark;
+      --bg: #0F172A;
+      --panel: rgba(15, 23, 42, .88);
+      --panel-soft: rgba(15, 23, 42, .72);
+      --line: rgba(255, 255, 255, .08);
+      --line2: rgba(255, 255, 255, .16);
+      --fg: #FFFFFF;
+      --fg2: #CBD5E1;
+      --fg3: #94A3B8;
+      --acc: #0891B2;
+      --accBg: rgba(8, 145, 178, .16);
+      --accLine: rgba(8, 145, 178, .48);
+      --ok: #10B981;
+      --warn: #F59E0B;
+      --bad: #EF4444;
+      --shadow: 0 16px 48px rgba(0, 0, 0, .34);
+      --blur: blur(18px) saturate(130%);
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      margin: 0; padding: 0; height: 100%; background: var(--bg);
+      overflow: hidden;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Noto Sans CJK SC", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
     #app { position: fixed; inset: 0; }
+    #app canvas { touch-action: none; }
+
+    /* 上下渐隐：让浮层控件压在 3D 画面上依然清晰 */
+    .scrimTop {
+      position: fixed; left: 0; right: 0; top: 0; height: 132px; z-index: 1;
+      pointer-events: none;
+      background: linear-gradient(180deg, rgba(2, 8, 20, .92) 0%, rgba(2, 8, 20, .46) 58%, transparent 100%);
+    }
+    .scrimBot {
+      position: fixed; left: 0; right: 0; bottom: 0; height: 220px; z-index: 1;
+      pointer-events: none;
+      background: linear-gradient(0deg, rgba(2, 8, 20, .94) 0%, rgba(2, 8, 20, .55) 52%, transparent 100%);
+    }
+
+    /* 顶栏：品牌 + 数据状态 */
+    .topbar {
+      position: fixed; top: 0; left: 0; right: 0; height: 64px; z-index: 3;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 18px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .brand i {
+      width: 8px; height: 8px; border-radius: 50%; background: var(--acc);
+      box-shadow: 0 0 14px rgba(8, 145, 178, .52); display: block;
+    }
+    .brand b {
+      font-size: 12px; font-weight: 700; letter-spacing: .18em; color: var(--fg);
+    }
+    .statusPill {
+      display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 13px;
+      border-radius: 999px; background: var(--panel); border: 1px solid var(--line2);
+      backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+      box-shadow: var(--shadow); color: var(--fg2);
+      font-size: 11px; font-weight: 600; letter-spacing: .04em;
+      font-variant-numeric: tabular-nums;
+      transition: color .2s ease-out, border-color .2s ease-out;
+    }
+    .statusPill .dot {
+      width: 7px; height: 7px; border-radius: 50%; background: var(--fg3);
+      transition: background-color .2s ease-out;
+    }
+    .statusPill[data-state="live"] { color: var(--fg); border-color: rgba(16, 185, 129, .38); }
+    .statusPill[data-state="live"] .dot { background: var(--ok); animation: pulse 1.6s ease-in-out infinite; }
+    .statusPill[data-state="wait"] .dot,
+    .statusPill[data-state="stale"] .dot { background: var(--warn); }
+    .statusPill[data-state="wait"],
+    .statusPill[data-state="stale"] { color: #FCD34D; border-color: rgba(245, 158, 11, .38); }
+    .statusPill[data-state="err"] { color: #FCA5A5; border-color: rgba(239, 68, 68, .38); }
+    .statusPill[data-state="err"] .dot { background: var(--bad); }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+
+    /* 底部数据舱：关节角 + 提示 + 告警 */
+    .deck {
+      position: fixed; left: 14px; right: 14px; bottom: 14px; z-index: 3;
+      display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+    }
+    .warnLine {
+      display: none; align-items: flex-start; gap: 8px; min-height: 30px;
+      padding: 8px 12px; border-radius: 13px;
+      background: rgba(245, 158, 11, .10); border: 1px solid rgba(245, 158, 11, .34);
+      color: #FCD34D; font-size: 11px; line-height: 1.55;
+    }
+    .warnLine::before {
+      content: ''; width: 7px; height: 7px; border-radius: 50%;
+      background: var(--warn); flex: 0 0 7px; margin-top: 4px;
+    }
+    .warnLine.on { display: flex; }
+    .joints {
+      display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px;
+      padding: 7px; border-radius: 18px;
+      background: var(--panel); border: 1px solid var(--line2);
+      backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+      box-shadow: var(--shadow);
+    }
+    .joint {
+      min-width: 0; min-height: 56px; border-radius: 12px;
+      background: var(--panel-soft); border: 1px solid transparent;
+      display: flex; flex-direction: column; justify-content: center; gap: 4px;
+      padding: 8px 6px; text-align: center;
+      transition: border-color .16s ease-out;
+    }
+    .joint .tag {
+      display: flex; align-items: center; justify-content: center; gap: 5px;
+      font-size: 10px; font-weight: 600; letter-spacing: .08em; color: var(--fg3);
+    }
+    .joint .tag i { width: 6px; height: 6px; border-radius: 50%; display: block; }
+    .joint .val {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 13px; font-weight: 600; color: var(--fg);
+      font-variant-numeric: tabular-nums; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis;
+    }
+    .joint.clamp { border-color: rgba(245, 158, 11, .44); }
+    .joint.clamp .tag { color: #FCD34D; }
+    .hintRow {
+      display: flex; justify-content: center; min-height: 26px;
+    }
     #hint {
-      position: fixed; left: 8px; bottom: 6px; color: #8b98a8;
-      font: 11px/1.4 -apple-system, "Noto Sans CJK SC", sans-serif; pointer-events: none;
+      display: flex; align-items: center; height: 26px; padding: 0 11px;
+      border-radius: 999px; background: var(--panel); border: 1px solid var(--line);
+      color: var(--fg3); font-size: 10.5px; white-space: nowrap; overflow: hidden;
+      text-overflow: ellipsis; max-width: 100%;
     }
     /* 数据异常（未收到 / 已停止）时转琥珀色，避免和正常提示混成一条灰字 */
-    #hint.warn { color: #ffc24b; }
+    #hint.warn { color: #FCD34D; border-color: rgba(245, 158, 11, .30); }
+
+    @media (max-width: 380px) {
+      .joint .val { font-size: 12px; }
+      .brand b { font-size: 11px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .statusPill .dot { animation: none; }
+      .statusPill, .statusPill .dot, .joint { transition-duration: .01ms !important; }
+    }
   </style>
 </head>
 <body>
   <div id="app"></div>
-  <div id="hint">单指拖动旋转 · 双指缩放 · 双击空白处复位视角</div>
+  <div class="scrimTop"></div>
+  <div class="scrimBot"></div>
+
+  <header class="topbar">
+    <div class="brand"><i></i><b>ARM CONSOLE</b></div>
+    <div class="statusPill" id="statusPill" role="status" aria-live="polite">
+      <span class="dot"></span><span id="statusText">加载中</span>
+    </div>
+  </header>
+
+  <div class="deck">
+    <div class="warnLine" id="warnLine"></div>
+    <div class="joints" id="joints" aria-label="关节角读数"></div>
+    <div class="hintRow">
+      <div id="hint">单指拖动旋转 · 双指缩放 · 双击空白处复位视角</div>
+    </div>
+  </div>
 
   <script type="module">
     import * as THREE from '../three/three.module.js';
@@ -45,7 +195,7 @@
     }
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x12161c);
+    scene.background = new THREE.Color(0x0F172A);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -64,18 +214,19 @@
     scene.add(fill);
 
     // 每个 link（= 每个关节的机体）一种颜色，一眼能看出是哪一节在动。
+    // 读数卡上的色点用同一组颜色，UI 与 3D 一一对应。
     const LINK_COLORS = {
       base_link: 0x5c6b7a,
-      first_Link: 0x2e86de,
-      second_Link: 0xf5a623,
-      third_Link: 0x27ae60,
-      fourth_Link: 0x9b59b6,
-      fifth_Link: 0xe74c3c,
+      first_Link: 0x38BDF8,
+      second_Link: 0xF59E0B,
+      third_Link: 0x34D399,
+      fourth_Link: 0xA78BFA,
+      fifth_Link: 0xF87171,
     };
 
     // 地面网格：URDF/ROS 约定 Z 轴朝上，而 GridHelper 默认铺在 XZ 平面，
     // 所以绕 X 转 90° 铺到 XY 平面，z=0 正好是底座底面。
-    const grid = new THREE.GridHelper(1.2, 24, 0x3d5875, 0x24313f);
+    const grid = new THREE.GridHelper(1.2, 24, 0x334D6B, 0x1B2940);
     grid.rotation.x = Math.PI / 2;
     scene.add(grid);
 
@@ -104,7 +255,48 @@
     let hintWarn = false;
 
     const hintEl = document.getElementById('hint');
+    const statusPill = document.getElementById('statusPill');
+    const statusText = document.getElementById('statusText');
+    const warnLine = document.getElementById('warnLine');
+    const jointsEl = document.getElementById('joints');
     const HINT_BASE = '单指拖动旋转 · 双指缩放 · 双击空白处复位视角';
+
+    // ------- 底部关节数据舱（读数卡与 3D 颜色一一对应） -------
+    let jointChips = [];
+    const displayQ = [];
+
+    function chipColorCss(linkName) {
+      const c = LINK_COLORS[linkName];
+      if (c === undefined) return '#94A3B8';
+      return '#' + c.toString(16).padStart(6, '0');
+    }
+
+    function buildJointChips() {
+      jointsEl.innerHTML = '';
+      jointChips = [];
+      jointNodes.forEach((j, i) => {
+        const chip = document.createElement('div');
+        chip.className = 'joint';
+        chip.innerHTML = '<span class="tag"><i></i>J' + (i + 1) + '</span>'
+          + '<span class="val">—</span>';
+        chip.querySelector('.tag i').style.background = chipColorCss(j.link);
+        jointsEl.appendChild(chip);
+        jointChips.push(chip);
+        displayQ[i] = null;
+      });
+    }
+
+    function fmtDeg(rad) {
+      const deg = rad * 180 / Math.PI;
+      return deg.toFixed(1) + '°';
+    }
+
+    function updateChip(i, applied) {
+      const chip = jointChips[i];
+      if (!chip) return;
+      displayQ[i] = applied;
+      chip.querySelector('.val').textContent = applied === null ? '—' : fmtDeg(applied);
+    }
 
     function dataStatus() {
       if (!ready) return '模型加载中…';
@@ -117,6 +309,13 @@
         return '关节数据已停止 ' + (ageMs / 1000).toFixed(0) + 's —— 显示的不是真机姿态';
       }
       return '';
+    }
+
+    function pillState() {
+      if (!ready) return ['load', '加载中'];
+      if (!lastQAt) return ['wait', '等待数据'];
+      if (performance.now() - lastQAt > STALE_MS) return ['stale', '数据中断'];
+      return ['live', '实时'];
     }
 
     function updateHint() {
@@ -135,6 +334,26 @@
       }
     }
 
+    // 状态胶囊 + 告警条与 hint 同源：全部由 dataStatus()/限位状态派生，
+    // 任何一处变化都会在 4Hz 复核里反映出来。
+    function updateUI() {
+      const [state, label] = pillState();
+      if (statusPill.dataset.state !== state) statusPill.dataset.state = state;
+      if (statusText.textContent !== label) statusText.textContent = label;
+
+      const warns = [];
+      if (clampedJoints.length) warns.push('已达机械限位：J' + clampedJoints.join(' J') + '（显示值停在限位处）');
+      const st = ready ? dataStatus() : '';
+      if (st) warns.push(st);
+      const warnText = warns.join('；');
+      if (warnLine.textContent !== warnText) warnLine.textContent = warnText;
+      warnLine.classList.toggle('on', !!warnText);
+
+      jointChips.forEach((chip, i) => {
+        chip.classList.toggle('clamp', clampedJoints.includes(i + 1));
+      });
+    }
+
     function wrapPi(v) {
       return v - 2 * Math.PI * Math.round(v / (2 * Math.PI));
     }
@@ -149,7 +368,8 @@
       clampedJoints = [];
       for (let i = 0; i < jointNodes.length; i++) {
         const v = arr[i];
-        if (typeof v !== 'number' || !isFinite(v)) continue;
+        const usable = typeof v === 'number' && isFinite(v);
+        if (!usable) { updateChip(i, null); continue; }
         const j = jointNodes[i];
         const w = wrapPi(v);
         let a = w;
@@ -157,8 +377,10 @@
         else if (j.hi !== null && w > j.hi) a = j.hi;
         if (a !== w) clampedJoints.push(i + 1);
         j.node.quaternion.setFromAxisAngle(j.axis, a);
+        updateChip(i, a);
       }
       updateHint();
+      updateUI();
     }
 
     // Kotlin 侧 10Hz 推关节角（单位 rad，URDF 关节角 q = sign×(pos−m0)）。
@@ -171,6 +393,11 @@
         lastQAt = performance.now();
       }
       if (ready) applyAngles(arr);
+    };
+
+    // 只读调试/测试接口：暴露每个关节的机械限位，便于自动化验证钳制行为。
+    window.getJointInfo = function () {
+      return jointNodes.map((j) => ({ lo: j.lo, hi: j.hi, link: j.link }));
     };
 
     function parseVec(str, fallback) {
@@ -293,6 +520,7 @@
             axis: new THREE.Vector3().fromArray(joint.axis).normalize(),
             lo: joint.lo,
             hi: joint.hi,
+            link: joint.child,
           });
         }
         await buildLink(joint.child, axisGroup, ctx);
@@ -371,6 +599,7 @@
       if (performance.now() - lastHintAt > 250) {
         lastHintAt = performance.now();
         updateHint();
+        updateUI();
       }
     }
 
@@ -384,10 +613,16 @@
         await buildLink(ctx.rootName, root, ctx);
         fitCamera(root);
         ready = true;
+        buildJointChips();
         if (pendingQ) applyAngles(pendingQ);
         window.viewerStatus = 'ready:joints=' + jointNodes.length;
+        updateUI();
       } catch (e) {
         window.viewerStatus = 'error:' + (e && e.message ? e.message : e);
+        statusPill.dataset.state = 'err';
+        statusText.textContent = '加载失败';
+        warnLine.textContent = '模型加载失败：' + (e && e.message ? e.message : e);
+        warnLine.classList.add('on');
         console.error('URDF 视窗初始化失败', e);
       }
     })();

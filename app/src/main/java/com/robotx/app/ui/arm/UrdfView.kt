@@ -56,7 +56,7 @@ fun UrdfView(
         modifier = modifier,
         factory = { ctx ->
             WebView(ctx).apply {
-                setBackgroundColor(Color.parseColor("#12161C"))
+                setBackgroundColor(Color.parseColor("#0F172A"))
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = false
                 settings.allowFileAccess = false
