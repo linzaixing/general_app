@@ -69,6 +69,7 @@ import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.json.JSONObject;
 
@@ -241,7 +242,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             public void onCameraLost() {
                 surfaceTexture = null;
                 previewing = false;
-                camExec.execute(MainActivity.this::closeCameraSync);
+                postCameraClose();
             }
 
             @Override
@@ -332,7 +333,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     protected void onStop() {
         ui.removeCallbacks(watchdog);
         previewing = false;
-        camExec.execute(this::closeCameraSync);
+        postCameraClose();
         try {
             if (permReceiverRegistered) {
                 unregisterReceiver(permReceiver);
@@ -477,10 +478,9 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         lastConnectAt = now;
         camText = "相机: 打开 USB 连接";
         updateStatus();
-        camExec.execute(() -> {
+        postCamera(() -> {
             try {
-                USBMonitor.UsbControlBlock cb = usbMonitor.openDevice(device);
-                if (cb == null) {
+                USBMonitor.UsbControlBlock cb = usbMonitor.openDevice(device);                if (cb == null) {
                     Log.e("PanoCam", "openDevice returned null");
                     ui.post(() -> {
                         camText = "相机: USB 连接失败";
@@ -678,7 +678,28 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         ctrlBlock = null;
         previewing = false;
         updateStatus();
-        camExec.execute(this::closeCameraSync);
+        postCameraClose();
+    }
+
+    /** 提交相机任务；Activity 正在销毁、线程池已 shutdown 时直接忽略。 */
+    private void postCamera(Runnable task) {
+        try {
+            camExec.execute(task);
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+        }
+    }
+
+    /** 把关相机丢给相机线程；Activity 正在销毁、线程池已 shutdown 时直接忽略。 */
+    private void postCameraClose() {
+        postCamera(this::closeCameraSync);
+    }
+
+    /** 提交渲染任务；Activity 收尾阶段线程池已停时直接丢弃。 */
+    private void postRender(Runnable task) {
+        try {
+            renderExec.execute(task);
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+        }
     }
 
     /** 只有设备已授权 + 有可用预览表面时才会真正打开，避免无意义的重开。 */
@@ -705,7 +726,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         lastOpenAt = now;
         camText = "相机: 正在打开";
         updateStatus();
-        camExec.execute(() -> openCameraSync(cb, st));
+        postCamera(() -> openCameraSync(cb, st));
     }
 
     private void openCameraSync(USBMonitor.UsbControlBlock cb, SurfaceTexture st) {
@@ -1144,10 +1165,11 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         private volatile float gyroPitch;
         private volatile boolean rawRequested;
         private volatile boolean gyroEnabled;
-        private volatile boolean frameConsumed = true;
         private volatile long pushedAt;
         private volatile long pushedAtNano;
         private volatile float roll;
+        /** 已推送但页面还没取走的帧数：≤0 时允许 GL 线程拼下一帧（同时最多 1 帧在途）。 */
+        private final AtomicInteger pendingFrames = new AtomicInteger();
 
         void setRoll(float deg) {
             roll = deg;
@@ -1155,21 +1177,21 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
         void pushFrame(String url) {
             frameUrl = url;
-            frameConsumed = false;
+            pendingFrames.incrementAndGet();
             pushedAt = System.currentTimeMillis();
             pushedAtNano = System.nanoTime();
         }
 
         /**
-         * 只有上一帧被页面真正解码上传后才允许再拼下一帧；超时兜底防止页面异常时卡死。
+         * 页面取走一帧就放行下一帧（编码与页面解码/上传并行），
+         * 页面异常不取帧时用 600ms 超时兜底，避免整条预览卡死。
          */
         boolean canStitch() {
-            return frameConsumed || System.currentTimeMillis() - pushedAt > 600;
+            return pendingFrames.get() <= 0 || System.currentTimeMillis() - pushedAt > 600;
         }
 
         @JavascriptInterface
         public void frameDone() {
-            frameConsumed = true;
             long pushed = pushedAtNano;
             if (pushed > 0) {
                 lastPreviewRoundMs = Math.max(0, System.nanoTime() - pushed) / 1_000_000.0;
@@ -1217,7 +1239,10 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         @JavascriptInterface
         public String pollFrame() {
             String s = frameUrl;
-            frameUrl = "";
+            if (s != null && s.length() > 0) {
+                frameUrl = "";
+                pendingFrames.updateAndGet(v -> v > 0 ? v - 1 : 0);
+            }
             return s;
         }
 
@@ -1920,7 +1945,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     /** GPU 路径：GL 线程拼好一帧后回调，这里只做 JPEG 编码 + 推给网页。 */
     private void handleGlPreview(final int[] eq, final int ow, final int oh) {
         final long t0 = Perf.t();
-        renderExec.execute(() -> {
+        postRender(() -> {
             try {
                 equirectPixels = eq;
                 eqW = ow;
@@ -2005,7 +2030,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         final int oh = ow / 2;
         // 防抖：把这一帧的重力 roll 一起带进拼接线程，预览/录像用的是同一时刻的角度
         final float rollRad = (float) Math.toRadians(rollForSave());
-        renderExec.execute(() -> {
+        postRender(() -> {
             long t2 = System.nanoTime();
             try {
                 int[] eq = PanoStitcher.stitchEquirectFast(frame, fw, fh, ow, oh,

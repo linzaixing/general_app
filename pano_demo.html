@@ -640,6 +640,39 @@ function uploadTexture(image) {
   if (HOST && HOST.frameDone) HOST.frameDone();   // 通知 App 可以拼下一帧了
 }
 
+// 实时帧入口：dataURL -> <img> 解码 -> createImageBitmap -> 纹理。
+// 直接 img.src 上传纹理时 WebView 要把 HTMLImageElement 再转换一遍（实测 upload 14~20ms）；
+// 先让浏览器把 JPEG 解成位图，再转 ImageBitmap 上传，decode 走浏览器解码器、upload 只剩 1ms 左右。
+let frameBusy = false;
+let frameQueued = null;
+const frameImg = new Image();
+
+function submitFrame(url) {
+  if (frameBusy) { frameQueued = url; return; }   // 只保留最新一帧，不排队
+  frameBusy = true;
+  frameSetAt = performance.now();
+  const finish = function () {
+    frameBusy = false;
+    const queued = frameQueued;
+    frameQueued = null;
+    if (queued) submitFrame(queued);
+  };
+  frameImg.onload = function () {
+    frameImg.onload = null;
+    frameImg.onerror = null;
+    createImageBitmap(frameImg)
+      .then(function (bmp) { uploadTexture(bmp); bmp.close(); })
+      .catch(function () {})
+      .then(finish);
+  };
+  frameImg.onerror = function () {
+    frameImg.onload = null;
+    frameImg.onerror = null;
+    finish();
+  };
+  frameImg.src = url;
+}
+
 // 已保存的 2:1 全景视频：用 <video> 当纹理，走同一套小行星/鸟瞰投影
 let videoEl = null, videoRaf = 0;
 function panoSetVideo(src) {
@@ -1591,8 +1624,7 @@ function pollHost(now) {
 
   const frame = HOST.pollFrame();
   if (frame && frame.length) {
-    frameSetAt = performance.now();
-    img.src = frame;      // img.onload 统一走 uploadTexture
+    submitFrame(frame);   // 走 ImageBitmap 路径，img.onload 只给网页静态图用
   }
 
   const g = HOST.pollGyro();
