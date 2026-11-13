@@ -34,8 +34,10 @@ import android.provider.MediaStore;
 import android.provider.Settings;
 import android.util.Base64;
 import android.util.Log;
+import android.view.Display;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
@@ -150,6 +152,11 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private long lastConnectAt;
     private String sizeInfo = "";
 
+    private boolean permRequestedForDevice;
+    /** 取景预览朝向：相机模组相对机身的固定偏置 + 重力量化到 90° 步进。 */
+    private static final float PREVIEW_ROT_OFFSET_DEG = -90f;
+    private int previewRotQuarter = -1;
+    private long lastRotLogAt;
     private SensorManager sensorManager;
     private long lastGyroTs;
     private float gx, gy, gz, ax, ay, az;
@@ -165,6 +172,9 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     // 手势：绕重力轴的累积朝向（连续值，可跨越 ±180°）
     private volatile boolean viewerVisible;
+    /** 静态查看模式（打开已保存成片），不跑实时拼接。 */
+    private volatile boolean viewerStatic;
+    private boolean viewerFromGallery;
     private final float[] rotMat = new float[9];
     private float spinYaw = Float.NaN;
     private float spinBase;
@@ -241,7 +251,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
             @Override
             public void onPhotoFrame(int[] eq, int ow, int oh) {
-                saveEquirectPhoto(eq, ow, oh, stabilize ? rollDeg : 0f);
+                saveEquirectPhoto(eq, ow, oh, rollForSave());
             }
 
             @Override
@@ -287,6 +297,18 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         } catch (Throwable ignored) {
         }
         updateStatus();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        // 插相机时系统按 device_filter 把 attach intent 送到已有实例：
+        // singleTask 保证落在外屏当前实例上，不会新开一个内屏实例
+        if (intent != null
+                && "android.hardware.usb.action.USB_DEVICE_ATTACHED".equals(intent.getAction())) {
+            ui.postDelayed(() -> requestUsbPermission(findUvcDevice()), 600);
+        }
     }
 
     @Override
@@ -404,6 +426,10 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             return;
         }
         lastPermRequestAt = now;
+        if (permRequestedForDevice) {
+            return;     // 同一次插入只弹一次授权框，避免内屏堆积
+        }
+        permRequestedForDevice = true;
         usbText = "USB: 申请授权中…";
         camText = "相机: 等待 USB 授权";
         updateStatus();
@@ -419,6 +445,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     private void onPermissionResult(UsbDevice device, boolean granted) {
         Log.i("PanoCam", "onPermissionResult granted=" + granted + " device=" + device);
+        permRequestedForDevice = false;
         if (granted) {
             usbText = "USB: 授权已通过";
             camText = "相机: 连接中";
@@ -578,13 +605,17 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                     ui.post(() -> {
                         usbText = "USB: 已识别 " + hex(device.getVendorId()) + ":" + hex(device.getProductId());
                         updateStatus();
-                        requestUsbPermission(device);
+                        // 稍等片刻：若系统按 device_filter 自动授权，这里就不用再弹授权框
+                        ui.postDelayed(() -> requestUsbPermission(device), 600);
                     });
                 }
 
                 @Override
                 public void onDetach(UsbDevice device) {
-                    ui.post(() -> handleUsbLost("USB: 已拔出"));
+                    ui.post(() -> {
+                        permRequestedForDevice = false;
+                        handleUsbLost("USB: 已拔出");
+                    });
                 }
 
                 @Override
@@ -979,6 +1010,9 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         WebSettings ws = web.getSettings();
         ws.setJavaScriptEnabled(true);
         ws.setDomStorageEnabled(true);
+        ws.setAllowFileAccess(true);
+        ws.setAllowFileAccessFromFileURLs(true);
+        ws.setAllowContentAccess(true);
         ws.setMediaPlaybackRequiresUserGesture(false);
         web.setWebViewClient(new WebViewClient());
         web.addJavascriptInterface(bridge, "PanoHost");
@@ -994,8 +1028,22 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
         stitchBtn.setOnClickListener(v -> doStitch());
 
-        // 首页「最近作品」瀑布流：启动即展示，点「开始拍摄」进入取景
-        gallery = new PanoGalleryView(this, () -> showGallery(false));
+        // 首页「最近作品」瀑布流：启动即展示，点「开始拍摄」进入取景，点作品进 360° 查看器
+        gallery = new PanoGalleryView(this, new PanoGalleryView.Listener() {
+            @Override
+            public void onShoot() {
+                showGallery(false);
+            }
+
+            @Override
+            public void onOpen(Uri uri, boolean video) {
+                if (video) {
+                    playVideo(uri);
+                } else {
+                    openPhotoViewer(uri);
+                }
+            }
+        });
         root.addView(gallery, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         gallery.bringToFront();
@@ -1009,6 +1057,16 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             return;
         }
         if (cameraView != null) cameraView.setRawDisplayEnabled(!show);
+        if (!show) {
+            // 进入取景/拼接：务必退出静态查看状态，否则实时拼接会被跳过（画面定格）
+            viewerStatic = false;
+            viewerFromGallery = false;
+            if (web != null) {
+                web.post(() -> web.evaluateJavascript(
+                        "if(window.panoStopVideo)panoStopVideo();"
+                                + "var s=document.getElementById('panoStaticStyle'); if(s) s.remove();", null));
+            }
+        }
         if (show) {
             gallery.refresh();
             gallery.bringToFront();
@@ -1203,8 +1261,8 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         public void setStabilize(boolean on) {
             stabilize = on;
             if (on) {
-                bridge.setRoll(rollDeg);
-                cameraView.setRoll(rollDeg);
+                bridge.setRoll(rollForDisplay());
+                cameraView.setRoll(rollForDisplay());
             } else {
                 bridge.setRoll(0f);
                 cameraView.setRoll(0f);
@@ -1378,7 +1436,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             recorder = rec;
             if (direct) {
                 cameraView.setRecorder(rec);
-                cameraView.setRoll(stabilize ? rollDeg : 0f);
+                cameraView.setRecorderRoll(rollForSave());   // 录制成片与拍照同一朝向
             }
             applyPreviewPolicy();
             onRecordState(true, null, null);
@@ -1427,7 +1485,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             return;
         }
         sendToPage("window.panoOnEvent && panoOnEvent('shutter','')");
-        final float shutterRoll = stabilize ? rollDeg : 0f;
+        final float shutterRoll = rollForSave();
         if (cameraView.isStitchOk()) {
             // GPU 直接按保存尺寸拼接后回读，省掉 Bitmap 再上传纹理的一次往返
             cameraView.requestPhoto(hiOutW(), shutterRoll);
@@ -1465,7 +1523,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     /** 把拼接好的 2:1 等距原图（按防抖角度摆正）写进相册 Pictures/PanoCam。 */
     private void saveEquirectPhoto(int[] eqIn, int ow, int oh) {
-        saveEquirectPhoto(eqIn, ow, oh, stabilize ? rollDeg : 0f);
+        saveEquirectPhoto(eqIn, ow, oh, rollForSave());
     }
 
     private void saveEquirectPhoto(int[] eqIn, int ow, int oh, float cpuRollDegrees) {
@@ -1666,10 +1724,88 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         ui.removeCallbacks(liveStitch);
         if (cameraView != null && cameraView.isStitchOk()) {
             // GPU 路径：GL 线程每帧自己拼并回调，不需要 UI 线程轮询
-            cameraView.setPreviewEnabled(true);
-        } else {
+            cameraView.setPreviewEnabled(!viewerStatic);
+        } else if (!viewerStatic) {
             // CPU 兜底：进入全景后用 UI 线程轮询重拼
             ui.postDelayed(liveStitch, 300);
+        }
+    }
+
+    /** 静态查看模式：隐藏相机页那套功能栏，只留小行星/鸟瞰的可交互展示。 */
+    private void applyStaticChrome() {
+        final String js = "var s=document.getElementById('panoStaticStyle');"
+                + "if(!s){s=document.createElement('style'); s.id='panoStaticStyle';"
+                + "s.textContent='.bar,.dock,.captureDeck,.statusRow,.hdr,.hint,#recHud,#hud,.scrimTop,.scrimBot{display:none!important}';"
+                + "document.head.appendChild(s);}"
+                + "var b=document.querySelector(\".bar button[data-mode='1']\"); if(b) b.click();";
+        web.postDelayed(() -> web.evaluateJavascript(js, null), 700);
+        web.postDelayed(() -> web.evaluateJavascript(js, null), 1800);
+    }
+
+    /** 作品里的视频：复制到缓存后交给网页查看器做 360 鸟瞰播放。 */
+    private void playVideo(Uri uri) {
+        try {
+            File dir = new File(getCacheDir(), "works");
+            if (!dir.exists() && !dir.mkdirs()) {
+                return;
+            }
+            File f = new File(dir, "work.mp4");
+            try (java.io.InputStream is = getContentResolver().openInputStream(uri);
+                 FileOutputStream os = new FileOutputStream(f)) {
+                if (is == null) {
+                    return;
+                }
+                byte[] buf = new byte[256 * 1024];
+                int n;
+                while ((n = is.read(buf)) > 0) {
+                    os.write(buf, 0, n);
+                }
+            }
+            viewerStatic = true;
+            viewerFromGallery = true;
+            gallery.setVisibility(View.GONE);
+            showViewer();
+            final String js = "window.panoSetVideo && panoSetVideo('file://" + f.getAbsolutePath() + "');";
+            web.postDelayed(() -> web.evaluateJavascript(js, null), 900);
+            web.postDelayed(() -> web.evaluateJavascript(js, null), 2000);
+            applyStaticChrome();
+        } catch (Throwable t) {
+            viewerStatic = false;
+            errText = "视频打开失败: " + t;
+            updateStatus();
+        }
+    }
+
+    /** 用 360° 查看器打开一张已保存的成片（静态帧，可拖动/陀螺仪浏览）。 */
+    private void openPhotoViewer(Uri uri) {
+        try {
+            byte[] bytes;
+            try (java.io.InputStream is = getContentResolver().openInputStream(uri)) {
+                if (is == null) {
+                    return;
+                }
+                ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                byte[] buf = new byte[64 * 1024];
+                int n;
+                while ((n = is.read(buf)) > 0) {
+                    bo.write(buf, 0, n);
+                }
+                bytes = bo.toByteArray();
+            }
+            if (bytes.length == 0) {
+                return;
+            }
+            String url = "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP);
+            viewerStatic = true;
+            viewerFromGallery = true;
+            gallery.setVisibility(View.GONE);
+            showViewer();
+            bridge.pushFrame(url);
+            applyStaticChrome();
+        } catch (Throwable t) {
+            viewerStatic = false;
+            errText = "打开作品失败: " + t;
+            updateStatus();
         }
     }
 
@@ -1686,6 +1822,18 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         hint.setVisibility(View.VISIBLE);
         setWaitingVisible(!previewing);
         viewerVisible = false;
+        viewerStatic = false;
+        if (web != null) {
+            web.post(() -> web.evaluateJavascript(
+                    "if(window.panoStopVideo)panoStopVideo();"
+                            + "var s=document.getElementById('panoStaticStyle'); if(s) s.remove();", null));
+        }
+        if (gallery != null && viewerFromGallery) {
+            gallery.refresh();
+            gallery.setVisibility(View.VISIBLE);
+            gallery.bringToFront();
+        }
+        viewerFromGallery = false;
         applyPreviewPolicy();
         resetGestures();
         cancelPendingGesture();
@@ -1697,6 +1845,9 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private final Runnable liveStitch = new Runnable() {
         @Override
         public void run() {
+            if (viewerStatic) {
+                return;
+            }
             if (web == null || web.getVisibility() != View.VISIBLE) {
                 return;
             }
@@ -1853,7 +2004,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         final int ow = recording ? rec.width() : effectivePreviewW;
         final int oh = ow / 2;
         // 防抖：把这一帧的重力 roll 一起带进拼接线程，预览/录像用的是同一时刻的角度
-        final float rollRad = stabilize ? (float) Math.toRadians(rollDeg) : 0f;
+        final float rollRad = (float) Math.toRadians(rollForSave());
         renderExec.execute(() -> {
             long t2 = System.nanoTime();
             try {
@@ -1949,6 +2100,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     @Override
     protected void onResume() {
         super.onResume();
+        updatePreviewRotation();
         Sensor g = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
         Sensor a = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
         if (g != null) {
@@ -2006,6 +2158,50 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         super.onDestroy();
     }
 
+    /** 角度归一化到 [-180,180)。 */
+    private static float normDeg(float d) {
+        return ((d % 360f) + 540f) % 360f - 180f;
+    }
+
+    /** 写入文件（拍照/录像）的角度：与屏幕显示补偿相反，保证成片本身正立。 */
+    private float rollForSave() {
+        return normDeg(-rollForDisplay());
+    }
+
+    /** 屏幕旋转角（0/90/180/270）。界面跟随设备旋转，拼接补偿直接由它驱动。 */
+    private int displayRotationDeg() {
+        try {
+            Display d = getDisplay();
+            if (d != null) {
+                switch (d.getRotation()) {
+                    case Surface.ROTATION_90: return 90;
+                    case Surface.ROTATION_180: return 180;
+                    case Surface.ROTATION_270: return 270;
+                    default: return 0;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return 0;
+    }
+
+    /** 送进预览/录制/保存的 roll：相机模组固定 -90° 偏置，再按屏幕旋转角反补。 */
+    private float rollForDisplay() {
+        return normDeg(PREVIEW_ROT_OFFSET_DEG - displayRotationDeg());
+    }
+
+    /** 取景预览朝向：竖持为基准，重力方向量化成 90° 步进（倒置时自动翻 180°）。 */
+    private void updatePreviewRotation() {
+        // 原始双半球预览：界面已跟随设备旋转，横屏无需再转；只有倒置（D=180）时翻转
+        int d = displayRotationDeg();
+        int q = (d == 180) ? 2 : 0;
+        if (previewRotQuarter != q) {
+            previewRotQuarter = q;
+            Log.i("PanoCam", "raw preview rot: display=" + d + " q=" + q);
+            if (cameraView != null) cameraView.setShowRotationQuarter(q);
+        }
+    }
+
     @Override
     public void onSensorChanged(SensorEvent event) {
         long now = System.currentTimeMillis();
@@ -2028,8 +2224,9 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 d = ((d + 540f) % 360f) - 180f;    // 跨 ±180° 时走短边，避免整圈回绕
                 rollDeg += d * 0.18f;
                 // 防抖关闭时预览也不做补偿，保证「看到的就是保存下来的朝向」
-                bridge.setRoll(stabilize ? rollDeg : 0f);
-                cameraView.setRoll(stabilize ? rollDeg : 0f);
+                bridge.setRoll(rollForDisplay());
+                cameraView.setRoll(rollForDisplay());
+                updatePreviewRotation();
             }
             onGestureTilt();
             return;

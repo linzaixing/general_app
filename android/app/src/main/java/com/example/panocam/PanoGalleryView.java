@@ -39,6 +39,8 @@ final class PanoGalleryView extends FrameLayout {
 
     interface Listener {
         void onShoot();
+        /** 点击作品：图片交给 360° 查看器，视频交给播放器。 */
+        void onOpen(Uri uri, boolean video);
     }
 
     /** 卡片高度 / 列宽，交错取值制造瀑布感（源图统一 2:1，裁中间段展示）。 */
@@ -185,6 +187,7 @@ final class PanoGalleryView extends FrameLayout {
 
         addView(root, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        buildSelBar();
     }
 
     private LinearLayout column() {
@@ -228,6 +231,12 @@ final class PanoGalleryView extends FrameLayout {
 
     // ---------------- 数据 ----------------
 
+    private boolean selecting;
+    private final java.util.Set<Uri> selected = new java.util.HashSet<>();
+    private LinearLayout selBar;
+    private TextView selCount;
+    private final java.util.Map<Uri, View> cardChecks = new java.util.HashMap<>();
+
     void refresh() {
         io.execute(() -> {
             List<Item> items = query();
@@ -262,6 +271,35 @@ final class PanoGalleryView extends FrameLayout {
                 }
             } catch (Throwable ignored) {
             }
+            // 录制保存的视频在 Movies/PanoCam，一起列出来
+            try {
+                Uri vbase = MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
+                String[] vproj = {
+                        MediaStore.Video.Media._ID,
+                        MediaStore.Video.Media.DISPLAY_NAME,
+                        MediaStore.Video.Media.WIDTH,
+                        MediaStore.Video.Media.HEIGHT,
+                        MediaStore.Video.Media.DATE_ADDED
+                };
+                String vsel = MediaStore.Video.Media.RELATIVE_PATH + " LIKE ?";
+                String[] vargs = {"%" + Environment.DIRECTORY_MOVIES + "/PanoCam%"};
+                try (android.database.Cursor c = getContext().getContentResolver().query(
+                        vbase, vproj, vsel, vargs, MediaStore.Video.Media.DATE_ADDED + " DESC")) {
+                    while (c != null && c.moveToNext() && out.size() < MAX_ITEMS) {
+                        long id = c.getLong(0);
+                        Item it = new Item();
+                        it.name = c.getString(1);
+                        it.w = c.getInt(2);
+                        it.h = c.getInt(3);
+                        it.date = c.getLong(4) * 1000L;
+                        it.uri = ContentUris.withAppendedId(vbase, id);
+                        it.video = true;
+                        out.add(it);
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+            out.sort((a, b) -> Long.compare(b.date, a.date));
         }
         if (out.isEmpty()) {
             File dir = new File(getContext().getExternalFilesDir(null), "pictures");
@@ -294,13 +332,14 @@ final class PanoGalleryView extends FrameLayout {
         }
         colA.removeAllViews();
         colB.removeAllViews();
+        cardChecks.clear();
         heightA = 0;
         heightB = 0;
 
         boolean empty = items.isEmpty();
         emptyBox.setVisibility(empty ? View.VISIBLE : View.GONE);
         scroll.setVisibility(empty ? View.GONE : View.VISIBLE);
-        countView.setText(empty ? "还没有保存的全景照片" : ("共 " + items.size() + " 张 · 点击查看"));
+        countView.setText(empty ? "还没有保存的全景作品" : ("共 " + items.size() + " 项 · 点击查看"));
 
         for (int i = 0; i < items.size(); i++) {
             Item it = items.get(i);
@@ -345,9 +384,190 @@ final class PanoGalleryView extends FrameLayout {
         tagLp.bottomMargin = dp(8);
         f.addView(tag, tagLp);
 
-        f.setOnClickListener(v -> preview(item));
+        // 多选模式的勾选角标
+        TextView check = new TextView(getContext());
+        check.setText("✓");
+        check.setTextSize(13);
+        check.setTextColor(0xFF101014);
+        check.setGravity(Gravity.CENTER);
+        GradientDrawable cb = new GradientDrawable();
+        cb.setShape(GradientDrawable.OVAL);
+        cb.setColor(getContext().getColor(R.color.lib_accent));
+        check.setBackground(cb);
+        check.setVisibility(View.GONE);
+        FrameLayout.LayoutParams cklp = new FrameLayout.LayoutParams(dp(24), dp(24),
+                Gravity.TOP | Gravity.START);
+        cklp.leftMargin = dp(8);
+        cklp.topMargin = dp(8);
+        f.addView(check, cklp);
+        cardChecks.put(item.uri, check);
+
+        if (item.video) {
+            TextView play = new TextView(getContext());
+            play.setText("▶");
+            play.setTextSize(12);
+            play.setTextColor(0xFFFFFFFF);
+            play.setBackgroundResource(R.drawable.lib_chip);
+            play.setPadding(dp(7), dp(3), dp(7), dp(3));
+            FrameLayout.LayoutParams plp = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP | Gravity.END);
+            plp.topMargin = dp(8);
+            plp.rightMargin = dp(8);
+            f.addView(play, plp);
+        }
+
+        f.setOnClickListener(v -> {
+            if (selecting) {
+                toggleSelect(item, check);
+            } else {
+                listener.onOpen(item.uri, item.video);
+            }
+        });
+        f.setOnLongClickListener(v -> {
+            if (!selecting) {
+                selecting = true;
+                updateSelBar();
+            }
+            toggleSelect(item, check);
+            return true;
+        });
         loadThumb(iv, item);
         return f;
+    }
+
+    private void toggleSelect(Item item, View check) {
+        if (selected.contains(item.uri)) {
+            selected.remove(item.uri);
+        } else {
+            selected.add(item.uri);
+        }
+        check.setVisibility(selected.contains(item.uri) ? View.VISIBLE : View.GONE);
+        if (selected.isEmpty()) {
+            selecting = false;
+        }
+        updateSelBar();
+    }
+
+    private void updateSelBar() {
+        if (selBar == null) {
+            return;
+        }
+        selBar.setVisibility(selecting ? View.VISIBLE : View.GONE);
+        if (selecting) {
+            selCount.setText("已选 " + selected.size() + " 项");
+        }
+    }
+
+    /** 顶部多选操作条：信息 / 删除 / 取消。 */
+    private void buildSelBar() {
+        selBar = new LinearLayout(getContext());
+        selBar.setOrientation(LinearLayout.HORIZONTAL);
+        selBar.setGravity(Gravity.CENTER_VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xEE17171A);
+        bg.setCornerRadius(dp(18));
+        selBar.setBackground(bg);
+        selBar.setPadding(dp(14), dp(8), dp(10), dp(8));
+        selBar.setVisibility(View.GONE);
+
+        selCount = new TextView(getContext());
+        selCount.setTextSize(12);
+        selCount.setTextColor(0xFFFFFFFF);
+        selBar.addView(selCount, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        selBar.addView(makeBarBtn("信息", v -> showInfo()));
+        selBar.addView(makeBarBtn("删除", v -> deleteSelected()));
+        selBar.addView(makeBarBtn("取消", v -> {
+            selected.clear();
+            selecting = false;
+            for (View c : cardChecks.values()) c.setVisibility(View.GONE);
+            updateSelBar();
+        }));
+
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP);
+        lp.leftMargin = dp(12);
+        lp.rightMargin = dp(12);
+        lp.topMargin = dp(10);
+        addView(selBar, lp);
+        selBar.bringToFront();
+    }
+
+    private TextView makeBarBtn(String text, View.OnClickListener l) {
+        TextView b = new TextView(getContext());
+        b.setText(text);
+        b.setTextSize(12);
+        b.setTextColor(0xFFFFFFFF);
+        b.setBackgroundResource(R.drawable.lib_chip);
+        b.setPadding(dp(12), dp(6), dp(12), dp(6));
+        b.setOnClickListener(l);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.leftMargin = dp(8);
+        b.setLayoutParams(lp);
+        return b;
+    }
+
+    private void showInfo() {
+        if (selected.size() != 1) {
+            android.widget.Toast.makeText(getContext(), "请只选一项查看信息", android.widget.Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Uri uri = selected.iterator().next();
+        java.util.concurrent.ExecutorService ex = io;
+        ex.execute(() -> {
+            String name = uri.getLastPathSegment();
+            long size = 0;
+            try (android.content.res.AssetFileDescriptor afd =
+                         getContext().getContentResolver().openAssetFileDescriptor(uri, "r")) {
+                if (afd != null) size = afd.getLength();
+            } catch (Throwable ignored) {
+            }
+            int w = 0, h = 0;
+            try (android.database.Cursor c = getContext().getContentResolver().query(uri,
+                    new String[]{"width", "height"}, null, null, null)) {
+                if (c != null && c.moveToFirst()) {
+                    w = c.getInt(0);
+                    h = c.getInt(1);
+                }
+            } catch (Throwable ignored) {
+            }
+            final long fs = size;
+            final int fw = w, fh = h;
+            post(() -> new android.app.AlertDialog.Builder(getContext())
+                    .setTitle("作品信息")
+                    .setMessage("分辨率: " + (fw > 0 ? fw + " × " + fh : "未知")
+                            + "\n体积: " + (fs > 0 ? String.format(Locale.US, "%.2f MB", fs / 1048576.0) : "未知")
+                            + "\nURI: " + name)
+                    .setPositiveButton("关闭", null)
+                    .show());
+        });
+    }
+
+    private void deleteSelected() {
+        List<Uri> targets = new ArrayList<>(selected);
+        io.execute(() -> {
+            int ok = 0;
+            for (Uri u : targets) {
+                try {
+                    getContext().getContentResolver().delete(u, null, null);
+                    ok++;
+                } catch (Throwable ignored) {
+                }
+            }
+            final int done = ok;
+            post(() -> {
+                selected.clear();
+                selecting = false;
+                updateSelBar();
+                android.widget.Toast.makeText(getContext(), "已删除 " + done + " 项",
+                        android.widget.Toast.LENGTH_SHORT).show();
+                refresh();
+            });
+        });
     }
 
     private void loadThumb(ImageView iv, Item item) {
@@ -388,42 +608,6 @@ final class PanoGalleryView extends FrameLayout {
         return null;
     }
 
-    // ---------------- 全屏预览 ----------------
-
-    private void preview(Item item) {
-        FrameLayout scrim = new FrameLayout(getContext());
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xF5000000);
-        scrim.setBackground(bg);
-
-        ImageView big = new ImageView(getContext());
-        big.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        scrim.addView(big, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        TextView tip = new TextView(getContext());
-        tip.setText("点击任意处返回");
-        tip.setTextSize(11);
-        tip.setTextColor(getContext().getColor(R.color.lib_text_secondary));
-        tip.setBackgroundResource(R.drawable.lib_chip);
-        tip.setPadding(dp(12), dp(6), dp(12), dp(6));
-        FrameLayout.LayoutParams tipLp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        tipLp.bottomMargin = dp(28);
-        scrim.addView(tip, tipLp);
-
-        scrim.setOnClickListener(v -> removeView(scrim));
-        addView(scrim, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        io.execute(() -> {
-            Bitmap bm = decode(item, Math.max(getResources().getDisplayMetrics().widthPixels, 1600));
-            if (bm != null) {
-                post(() -> big.setImageBitmap(bm));
-            }
-        });
-    }
-
     // ---------------- 工具 ----------------
 
     private GradientDrawable oval(int color) {
@@ -444,5 +628,6 @@ final class PanoGalleryView extends FrameLayout {
         int w;
         int h;
         long date;
+        boolean video;
     }
 }

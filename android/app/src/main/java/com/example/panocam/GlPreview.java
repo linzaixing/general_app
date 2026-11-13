@@ -185,6 +185,8 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
     private volatile int previewW = 1536;
     private volatile boolean stitchOk;
     private volatile float rollDeg;
+    /** 录制专用 roll（成片朝向），与屏幕预览的 roll 分开，避免被传感器更新覆盖。 */
+    private volatile float recRollDeg;
     private volatile long lastFrameAt;
     private int previewTick;
     private int recSwaps;
@@ -192,6 +194,12 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
     private int ratioW = 2, ratioH = 1;
 
     private int progRawShow, progRawRead, progErpRec, progErpRead, progSelf;
+    /** 取景预览按 90° 步进旋转（0..3），用于竖屏/横屏与相机倒置。 */
+    private volatile int showRot;
+    private int showPosRot = -1;
+    private float showPosImgA = -1f;
+    private FloatBuffer rotTex;
+    private int rotTexRot = -1;
     private final Map<Integer, Locations> locations = new HashMap<>();
     private PanoStitcher.Lenses lenses;
     private int lensSourceW;
@@ -247,6 +255,16 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
 
     public void setRoll(float deg) {
         rollDeg = deg;
+    }
+
+    /** 取景画面旋转：q=0/1/2/3 对应 0°/90°/180°/270°。 */
+    public void setShowRotationQuarter(int q) {
+        showRot = ((q % 4) + 4) % 4;
+    }
+
+    /** 录制/摄像头的写入角度（与屏幕预览解耦）。 */
+    public void setRecorderRoll(float deg) {
+        recRollDeg = deg;
     }
 
     /** 全景页可见时才需要往网页推帧。 */
@@ -787,7 +805,7 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
                     return;
                 }
                 long g = Perf.t();
-                drawErp(progErpRec, camW, camH, (float) Math.toRadians(rollDeg),
+                drawErp(progErpRec, camW, camH, (float) Math.toRadians(recRollDeg),
                         recW, recH, 0f, cameraTex, false);
                 Perf.end(Perf.GPU, g);
                 EGLExt.eglPresentationTimeANDROID(display, recSurface, System.nanoTime());
@@ -858,7 +876,11 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
         if (vw <= 0 || vh <= 0) {
             return;
         }
-        float imgA = camW > 0 && camH > 0 ? (float) camW / camH : 2f;
+        int rot = showRot & 3;
+        // 旋转 90°/270° 后画面的宽高比要互换，才能按旋转后的方向贴合窗口
+        float imgA = camW > 0 && camH > 0
+                ? (rot % 2 == 0 ? (float) camW / camH : (float) camH / camW)
+                : 2f;
         float viewA = (float) vw / vh;
         float hw = 1f, hh = 1f;
         if (viewA > imgA) {
@@ -867,12 +889,31 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
             hh = viewA / imgA;
         }
         float[] q = {-hw, -hh, hw, -hh, -hw, hh, hw, hh};
-        if (showPos == null || showPosW != vw || showPosH != vh) {
+        if (showPos == null || showPosW != vw || showPosH != vh
+                || showPosRot != rot || Math.abs(showPosImgA - imgA) > 1e-4f) {
             showPos = ByteBuffer.allocateDirect(q.length * 4)
                     .order(ByteOrder.nativeOrder()).asFloatBuffer();
             showPos.put(q).position(0);
             showPosW = vw;
             showPosH = vh;
+            showPosRot = rot;
+            showPosImgA = imgA;
+        }
+        // 纹理坐标随旋转步进，与上方的宽高互换保持一致
+        if (rotTex == null || rotTexRot != rot) {
+            float[][] base = {{0, 1}, {1, 1}, {0, 0}, {1, 0}};
+            float[] t = new float[8];
+            for (int i = 0; i < 4; i++) {
+                float u = base[i][0], v = base[i][1];
+                switch (rot) {
+                    case 1: t[i * 2] = v; t[i * 2 + 1] = 1f - u; break;
+                    case 2: t[i * 2] = 1f - u; t[i * 2 + 1] = 1f - v; break;
+                    case 3: t[i * 2] = 1f - v; t[i * 2 + 1] = u; break;
+                    default: t[i * 2] = u; t[i * 2 + 1] = v; break;
+                }
+            }
+            rotTex = toBuffer(t);
+            rotTexRot = rot;
         }
 
         GLES20.glViewport(0, 0, vw, vh);
@@ -885,7 +926,7 @@ public final class GlPreview extends TextureView implements TextureView.SurfaceT
         Locations loc = locations.get(progRawShow);
         GLES20.glUniform1i(loc.src, 0);
         GLES20.glUniformMatrix4fv(loc.st, 1, false, stMat, 0);
-        bindQuad(progRawShow, showPos, fitTex);
+        bindQuad(progRawShow, showPos, rotTex);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
     }
 

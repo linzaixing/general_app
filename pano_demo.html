@@ -472,7 +472,7 @@ void main() {
     float th = 2.0 * atan(r);
     float ph = atan(vDn, u);
     d = vec3(sin(th) * cos(ph), uMode == 1 ? -cos(th) : cos(th), sin(th) * sin(ph));
-    d = rotateDir(d, uYaw, 0.0);
+    d = rotateDir(d, uYaw, uPitch);
   } else if (uMode == 3) {
     float r = length(vec2(u, vDn));
     float th = r * uFov * PI / 360.0;
@@ -623,8 +623,8 @@ function uploadTexture(image) {
   }
   const u0 = performance.now();
   gl.bindTexture(gl.TEXTURE_2D, tex);
-  const width = image.naturalWidth || image.width;
-  const height = image.naturalHeight || image.height;
+  const width = image.videoWidth || image.naturalWidth || image.width;
+  const height = image.videoHeight || image.naturalHeight || image.height;
   if (textureWidth === width && textureHeight === height) {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, image);
   } else {
@@ -639,6 +639,40 @@ function uploadTexture(image) {
   ready = true;
   if (HOST && HOST.frameDone) HOST.frameDone();   // 通知 App 可以拼下一帧了
 }
+
+// 已保存的 2:1 全景视频：用 <video> 当纹理，走同一套小行星/鸟瞰投影
+let videoEl = null, videoRaf = 0;
+function panoSetVideo(src) {
+  if (!videoEl) {
+    videoEl = document.createElement('video');
+    videoEl.loop = true;
+    videoEl.muted = true;
+    videoEl.setAttribute('playsinline', '');
+  }
+  videoEl.src = src;
+  videoEl.load();
+  videoEl.play().catch(function () {});
+  if (videoRaf) cancelAnimationFrame(videoRaf);
+  const tick = function () {
+    if (videoEl && videoEl.readyState >= 2) uploadTexture(videoEl);
+    videoRaf = requestAnimationFrame(tick);
+  };
+  videoRaf = requestAnimationFrame(tick);
+}
+window.panoSetVideo = panoSetVideo;
+function panoStopVideo() {
+  if (videoRaf) {
+    cancelAnimationFrame(videoRaf);
+    videoRaf = 0;
+  }
+  if (videoEl) {
+    try { videoEl.pause(); } catch (e) {}
+    videoEl.removeAttribute('src');
+    videoEl.load();
+    videoEl = null;
+  }
+}
+window.panoStopVideo = panoStopVideo;
 
 // 网页端用静态贴图；App 端改由 PanoHost 持续推送实时帧
 if (!HOST) {

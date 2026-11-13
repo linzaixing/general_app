@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Insta360 Air / 常见 2:1 全景 UVC 相机：0x2E1A，另有 0x2E0A 版本 -->
+    <usb-device vendor-id="11802" product-id="4096" />
     <usb-device vendor-id="11786" product-id="4096" />
 </resources>
