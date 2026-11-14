@@ -550,7 +550,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         }
         new AlertDialog.Builder(this)
                 .setTitle("需要相机权限")
-                .setMessage("PanoCam 需要「相机」权限才能读取 USB 全景相机的画面。\n"
+                .setMessage("OpenPano 需要「相机」权限才能读取 USB 全景相机的画面。\n"
                         + "请点击「去授权」，在弹窗中选择“允许”；若系统不再弹窗，请用「去设置」手动打开。")
                 .setPositiveButton("去授权", (d, w) -> {
                     if (hasCameraPermission()) {

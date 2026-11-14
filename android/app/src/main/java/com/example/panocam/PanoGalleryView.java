@@ -105,7 +105,7 @@ final class PanoGalleryView extends FrameLayout {
         brand.addView(dot, dotLp);
 
         TextView mark = new TextView(getContext());
-        mark.setText("PANOCAM");
+        mark.setText("OPENPANO");
         mark.setTextSize(11);
         mark.setLetterSpacing(0.22f);
         mark.setTextColor(0xD0FFFFFF);

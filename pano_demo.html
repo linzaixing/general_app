@@ -279,7 +279,7 @@
 <div class="scrimBot"></div>
 
 <div class="hdr">
-  <div class="brand"><i></i><div class="brandCopy"><b>PanoCam</b><span>SPHERICAL VIEW</span></div></div>
+  <div class="brand"><i></i><div class="brandCopy"><b>OpenPano</b><span>SPHERICAL VIEW</span></div></div>
   <button class="ic" id="btnExit" aria-label="退出全景">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
       <path d="M14 5h4a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1h-4"/><path d="M10 12H3"/><path d="m6 9-3 3 3 3"/>
@@ -389,10 +389,19 @@ const HOST = window.PanoHost || null;
 // v4：画质优先——采集 3008×1504，保存上限 2784×1392（拼接光学极限）
 const QUALITY_KEY = 'pano-quality-v4';
 const STAB_KEY = 'pano-stab-v1';
-let quality = { preview: 1536, save: 2784 };
+// 默认预览画质按屏幕大小自动选：小屏（外屏）用「中」1024 保流畅，大屏用「高」1536
+// 外屏窗口被系统放大到 603×527dp 再缩小显示，窗口尺寸区分不了，必须看屏幕 dp 尺寸
+function defaultPreviewWidth() {
+  const sw = screen.width || window.innerWidth || 0;
+  const sh = screen.height || window.innerHeight || 0;
+  return sw * sh >= 200000 ? 1536 : 1024;
+}
+let quality = { preview: defaultPreviewWidth(), save: 2784 };
+// 只有用户手动选过才记住；自动默认值随屏幕大小变化重新计算
+let qualityChosen = false;
 try {
   const q = JSON.parse(localStorage.getItem(QUALITY_KEY) || 'null');
-  if (q && q.preview && q.save) quality = q;
+  if (q && q.preview && q.save) { quality = q; qualityChosen = true; }
 } catch (e) {}
 let effectivePreview = quality.preview;
 // 防抖默认开启：预览和保存的原图都按重力 roll 锁定地平线；关掉则用相机原始朝向
@@ -829,7 +838,14 @@ function resize() {
   }
   return dpr;
 }
-window.addEventListener('resize', resize);
+window.addEventListener('resize', () => {
+  // 自动默认值跟着视口变化：折叠/展开切换屏幕时重新选画质
+  if (!qualityChosen) {
+    const w = defaultPreviewWidth();
+    if (w !== quality.preview) { applyQuality(w, 0, false); return; }
+  }
+  resize();
+});
 resize();
 
 function drawScene(w, h, cam, opts) {
@@ -1548,12 +1564,15 @@ document.addEventListener('keydown', event => {
   }
 }, true);
 
-function applyQuality(prevW, saveW) {
+function applyQuality(prevW, saveW, persist) {
   if (prevW) quality.preview = prevW;
   if (saveW) quality.save = saveW;
+  if (persist) {
+    qualityChosen = true;
+    localStorage.setItem(QUALITY_KEY, JSON.stringify(quality));
+  }
   effectivePreview = quality.preview;
   resize();
-  localStorage.setItem(QUALITY_KEY, JSON.stringify(quality));
   document.querySelectorAll('#qPrev button').forEach(b =>
     { const selected = Number(b.dataset.w) === quality.preview; b.classList.toggle('on', selected); setPressed(b, selected); });
   document.querySelectorAll('#qSave button').forEach(b =>
@@ -1570,9 +1589,9 @@ btnQuality.addEventListener('click', () => {
 });
 document.getElementById('qClose').addEventListener('click', closeQualityDialog);
 document.querySelectorAll('#qPrev button').forEach(b =>
-  b.addEventListener('click', () => applyQuality(Number(b.dataset.w), 0)));
+  b.addEventListener('click', () => applyQuality(Number(b.dataset.w), 0, true)));
 document.querySelectorAll('#qSave button').forEach(b =>
-  b.addEventListener('click', () => applyQuality(0, Number(b.dataset.w))));
+  b.addEventListener('click', () => applyQuality(0, Number(b.dataset.w), true)));
 
 function setStabilize(on, quiet) {
   stabilize = on;
@@ -1588,7 +1607,7 @@ function setStabilize(on, quiet) {
 }
 
 btnStab.addEventListener('click', () => setStabilize(!stabilize, false));
-applyQuality(0, 0);
+applyQuality(0, 0, false);
 setStabilize(stabilize, true);
 
 // --- 深链接 ----------------------------------------------------------------
